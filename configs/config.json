@@ -1,0 +1,62 @@
+{
+  "data": {
+    "emojis_dir": "data/emojis",
+    "targets": [
+      "bacteria.png",
+      "heart.png",
+      "gecko.png",
+      "tooth.png",
+      "star.png",
+      "smile.png",
+      "four_leaf_clover.png",
+      "squid.png",
+      "eye.png"
+    ],
+    "active_target": "gecko.png",
+    "img_size": 40
+  },
+
+  "model": {
+    "n_channels": 16,
+    "perception": {
+      "sobel": true,
+      "identity": true
+    },
+    "update_mlp": {
+      "hidden_dim": 128,
+      "layers": 2
+    },
+    "layer_norm": true,
+    "fire_rate": 0.5
+  },
+
+  "training": {
+    "pool_size": 512,
+    "batch_size": 8,
+    "steps_per_epoch": 500,
+    "nca_steps_min": 64,
+    "nca_steps_max": 96,
+    "num_epochs": 20,
+    "learning_rate": 0.001,
+    "optimizer": "Adam",
+    "weight_decay": 0.0,
+    "scheduler": null,
+    "gradient_clip": 1.0,
+    "loss": "mse"
+  },
+
+  "logging": {
+    "checkpoint_interval_epochs": 5,
+    "log_interval": 50,
+    "save_interval": 200,
+    "results_dir": "outputs",
+    "checkpoint_dir": "outputs/checkpoints",
+    "visualize_interval": 200
+  },
+
+  "misc": {
+    "device": "cuda",
+    "seed": 42,
+    "num_workers": 2
+  }
+}
