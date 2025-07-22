@@ -31,12 +31,12 @@
   },
 
   "training": {
-    "pool_size": 512,
+    "pool_size": 216,
     "batch_size": 8,
     "steps_per_epoch": 500,
-    "nca_steps_min": 64,
-    "nca_steps_max": 96,
-    "num_epochs": 20,
+    "nca_steps_min": 32,
+    "nca_steps_max": 64,
+    "num_epochs": 15,
     "learning_rate": 0.001,
     "optimizer": "Adam",
     "weight_decay": 0.0,
@@ -58,5 +58,12 @@
     "device": "cuda",
     "seed": 42,
     "num_workers": 2
+  },
+
+  "graph_augmentation": {
+    "d_model": 16,
+    "attention_radius": 3,
+    "num_neighbors": 8,
+    "gating_hidden": 32
   }
 }

@@ -1,10 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import torch
 
-def save_comparison(target, pred, epoch, out_dir, filename=None):
+def save_comparison(target, pred, epoch, out_dir, filename=None, upscale=4):
     """
-    Save a side-by-side comparison: target RGBA and predicted RGBA.
+    Save a side-by-side comparison: target RGBA and predicted RGBA, optionally upscaled.
 
     Args:
         target: [4, H, W] or [B, 4, H, W] (torch.Tensor or numpy)
@@ -12,6 +13,7 @@ def save_comparison(target, pred, epoch, out_dir, filename=None):
         epoch:  int, current epoch
         out_dir: directory to save image
         filename: custom name (optional)
+        upscale: int, how much to scale for visualization (default: 4)
     """
     if hasattr(target, "detach"):
         target = target.detach().cpu()
@@ -22,9 +24,28 @@ def save_comparison(target, pred, epoch, out_dir, filename=None):
     if pred.ndim == 4:
         pred = pred[0]
 
-    # Clamp and transpose for plt.imshow
-    target_img = target[:4].permute(1,2,0).numpy().clip(0,1)
-    pred_img = pred[:4].permute(1,2,0).numpy().clip(0,1)
+    # Optionally upscale for visualization
+    def upscale_img(img, scale):
+        if isinstance(img, torch.Tensor):
+            img = img.unsqueeze(0)  # [1, 4, H, W]
+            img = torch.nn.functional.interpolate(
+                img, scale_factor=scale, mode='bilinear', align_corners=False
+            )[0]
+            img = img.permute(1, 2, 0).numpy()
+        else:
+            from PIL import Image
+            img = np.clip(img, 0, 1)
+            img = (img * 255).astype(np.uint8)
+            pil_img = Image.fromarray(img)
+            img = pil_img.resize((img.shape[1] * scale, img.shape[0] * scale), Image.BILINEAR)
+            img = np.asarray(img).astype(np.float32) / 255.0
+        return img
+
+    target_img = target[:4]
+    pred_img = pred[:4]
+    target_img = upscale_img(target_img, upscale)
+    pred_img = upscale_img(pred_img, upscale)
+
     fig, axs = plt.subplots(1, 2, figsize=(6, 3))
     axs[0].imshow(target_img)
     axs[0].set_title("Target")
