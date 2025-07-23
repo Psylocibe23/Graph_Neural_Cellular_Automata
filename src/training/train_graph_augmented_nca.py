@@ -12,6 +12,7 @@ from modules.nca import NeuralCA
 from utils.visualize import save_comparison
 from modules.graph_augmentation import GraphAugmentation
 from torch.utils.tensorboard import SummaryWriter
+from utils.utility_functions import count_parameters
 
 
 
@@ -57,7 +58,8 @@ def main():
         img_size=img_size,
         device=device
     ).to(device)
-    
+    nca_param_count = count_parameters(model)
+
     # --- Graph augmentation hyperparameters ---
     graph_aug = GraphAugmentation(
         n_channels=n_channels,
@@ -66,6 +68,8 @@ def main():
         num_neighbors=config.get("graph_augmentation", {}).get("num_neighbors", 8),
         gating_hidden=config.get("graph_augmentation", {}).get("gating_hidden", 32)
     ).to(device)
+    graph_aug_param_count = count_parameters(graph_aug)
+    total_param_count = nca_param_count + graph_aug_param_count
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(graph_aug.parameters()),
@@ -143,6 +147,9 @@ def main():
 
     writer.close()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Training completed.")
+    print(f"Classic NCA parameters: {nca_param_count:,}")
+    print(f"Graph Augmentation parameters: {graph_aug_param_count:,}")
+    print(f"Total (Graph-Augmented NCA): {total_param_count:,}")
 
 if __name__ == "__main__":
     main()

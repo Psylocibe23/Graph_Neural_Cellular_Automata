@@ -11,6 +11,7 @@ from training.pool import SamplePool
 from modules.nca import NeuralCA
 from utils.visualize import save_comparison
 from torch.utils.tensorboard import SummaryWriter
+from utils.utility_functions import count_parameters
 
 
 
@@ -61,6 +62,7 @@ def main():
         device=device
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"])
+    nca_param_count = count_parameters(model)
     
     # 7. Initialize pool
     pool = SamplePool(config["training"]["pool_size"], seed_fn, device=device)
@@ -136,6 +138,7 @@ def main():
 
     writer.close()
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Training completed.")
+    print(f"Classic NCA parameters: {nca_param_count:,}")
 
 if __name__ == "__main__":
     main()
