@@ -1,5 +1,8 @@
 import os
 import torch
+import json
+import numpy as np
+import time
 import torch.nn.functional as F
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -13,7 +16,8 @@ from utils.visualize import save_comparison
 from modules.graph_augmentation import GraphAugmentation
 from torch.utils.tensorboard import SummaryWriter
 from utils.utility_functions import count_parameters
-
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity as ssim
 
 
 def save_grid_as_image(grid, filename):
@@ -24,6 +28,7 @@ def save_grid_as_image(grid, filename):
     plt.imsave(filename, img)
 
 def main():
+    start_time = time.time()
     config = load_config("configs/config.json")
     # Set up special folder
     active_target_name = os.path.splitext(config["data"]["active_target"])[0]
@@ -58,7 +63,6 @@ def main():
         img_size=img_size,
         device=device
     ).to(device)
-    nca_param_count = count_parameters(model)
 
     # --- Graph augmentation hyperparameters ---
     graph_aug = GraphAugmentation(
@@ -68,8 +72,6 @@ def main():
         num_neighbors=config.get("graph_augmentation", {}).get("num_neighbors", 8),
         gating_hidden=config.get("graph_augmentation", {}).get("gating_hidden", 32)
     ).to(device)
-    graph_aug_param_count = count_parameters(graph_aug)
-    total_param_count = nca_param_count + graph_aug_param_count
 
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(graph_aug.parameters()),
@@ -88,9 +90,22 @@ def main():
     save_interval = config["logging"]["save_interval"]
     visualize_interval = config["logging"]["visualize_interval"]
 
+    logs_dir = os.path.join(base_dir, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+
+    # 9. Metrics recording
+    pixel_scores = []
+    epoch_losses = []
+    ssim_scores = []
+    psnr_scores = []
+    tol = 0.05  # Tolerance for pixel perfection score
+
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
     for epoch in trange(1, total_epochs + 1, desc="Epochs"):
         avg_loss = 0.0
+        epoch_pixel_scores = []
+        epoch_ssim_scores = []
+        epoch_psnr_scores = []
         for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
             idx, batch = pool.sample(batch_size)
             batch = batch.to(device)
@@ -106,6 +121,16 @@ def main():
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            # Record metrics
+            pred_img = pred[0].detach().cpu().numpy()
+            target_img = target.cpu().numpy()
+            diff = np.abs(pred_img[:4] - target_img[:4])
+            pixel_perfect = (diff < tol).all(axis=0).mean()
+            epoch_pixel_scores.append(float(pixel_perfect))
+            pred_np = pred[0, :3].detach().cpu().permute(1,2,0).numpy().clip(0, 1)
+            target_np = target[:3].cpu().permute(1,2,0).numpy().clip(0, 1)
+            epoch_ssim_scores.append(ssim(pred_np, target_np, data_range=1.0, channel_axis=-1))
+            epoch_psnr_scores.append(psnr(pred_np, target_np, data_range=1.0))
             pool.replace(idx, batch)
             avg_loss += loss.item()
 
@@ -129,6 +154,11 @@ def main():
                 save_comparison(target, pred[0], f"{epoch}_step{step+1}", config["logging"]["results_dir"], upscale=4)
                 print(f"Saved comparison image at epoch {epoch}, step {step+1}")
         avg_loss /= steps_per_epoch
+        epoch_losses.append(avg_loss)
+        pixel_scores.append(float(np.mean(epoch_pixel_scores)))
+        ssim_scores.append(float(np.mean(epoch_ssim_scores)))
+        psnr_scores.append(float(np.mean(epoch_psnr_scores)))
+        writer.add_scalar('Loss/epoch_avg', avg_loss, epoch)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
               f"Average loss: {avg_loss:.6f}")
 
@@ -146,10 +176,29 @@ def main():
             print(f"Model checkpoint saved to {ckpt_path}")
 
     writer.close()
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Training completed.")
-    print(f"Classic NCA parameters: {nca_param_count:,}")
-    print(f"Graph Augmentation parameters: {graph_aug_param_count:,}")
-    print(f"Total (Graph-Augmented NCA): {total_param_count:,}")
+    log_data = {
+        "training_time_minutes": (time.time() - start_time)/60,
+        "config": config,
+        "parameter_count": count_parameters(model) + (count_parameters(graph_aug) if "graph_aug" in locals() else 0),
+        "graph_augmentation_parameters": count_parameters(graph_aug),
+        "seed": config["misc"].get("seed"),
+        "initial_loss": float(epoch_losses[0]) if epoch_losses else None,
+        "final_loss": float(epoch_losses[-1]) if epoch_losses else None,
+        "epoch_losses": epoch_losses,
+        "average_pixel_perfection": float(np.mean(pixel_scores)) if pixel_scores else None,
+        "pixel_perfection_per_epoch": pixel_scores,
+        "SSIM description": "Structural Similarity Index. Measures perceptual similarity (luminance, contrast, structure); higher is better, max=1",
+        "average_ssim": float(np.mean(ssim_scores)) if ssim_scores else None,
+        "ssim_per_epoch": ssim_scores,
+        "PSNR description": "Peak Signal-to-Noise Ratio in dB. Higher means lower pixel error and better fidelity",
+        "average_psnr": float(np.mean(psnr_scores)) if psnr_scores else None,
+        "psnr_per_epoch": psnr_scores
+    }
+    
+    log_path = os.path.join(logs_dir, "training_log.json")
+    with open(log_path, "w") as f:
+        json.dump(log_data, f, indent=2)
+    print(f"Saved training log to {log_path}")
 
 if __name__ == "__main__":
     main()
