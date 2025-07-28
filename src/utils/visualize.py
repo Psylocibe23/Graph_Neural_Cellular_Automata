@@ -27,20 +27,27 @@ def save_comparison(target, pred, epoch, out_dir, filename=None, upscale=4):
     # Optionally upscale for visualization
     def upscale_img(img, scale):
         if isinstance(img, torch.Tensor):
-            img = img.unsqueeze(0)  # [1, 4, H, W]
+            if img.ndim == 2:  # [H, W]
+                img = img.unsqueeze(0)  # [1, H, W]
+            if img.ndim == 3:
+                img = img.unsqueeze(0)  # [1, C, H, W]
+            elif img.ndim == 4 and img.shape[0] != 1:
+                img = img[0:1]
             img = torch.nn.functional.interpolate(
                 img, scale_factor=scale, mode='bilinear', align_corners=False
-            )[0]
-            img = img.permute(1, 2, 0).numpy()
+            )
+            img = img[0].permute(1, 2, 0).cpu().numpy()  # [H, W, C]
         else:
             from PIL import Image
             img = np.clip(img, 0, 1)
+            if img.ndim == 2:
+                img = np.expand_dims(img, axis=-1)
             img = (img * 255).astype(np.uint8)
             pil_img = Image.fromarray(img)
             img = pil_img.resize((img.shape[1] * scale, img.shape[0] * scale), Image.BILINEAR)
             img = np.asarray(img).astype(np.float32) / 255.0
         return img
-
+    
     target_img = target[:4]
     pred_img = pred[:4]
     target_img = upscale_img(target_img, upscale)

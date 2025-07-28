@@ -12,7 +12,7 @@
       "squid.png",
       "eye.png"
     ],
-    "active_target": "eye.png",
+    "active_target": "squid.png",
     "img_size": 40
   },
 
@@ -42,7 +42,8 @@
     "weight_decay": 0.0,
     "scheduler": null,
     "gradient_clip": 1.0,
-    "loss": "mse"
+    "loss": "mse",
+    "damage_patch_size": 10
   },
 
   "logging": {

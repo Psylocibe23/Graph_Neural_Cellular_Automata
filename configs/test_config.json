@@ -1,0 +1,33 @@
+{
+  "data": {
+    "emojis_dir": "data/emojis",
+    "targets": [
+      "bacteria.png",
+      "heart.png",
+      "gecko.png",
+      "tooth.png",
+      "star.png",
+      "smile.png",
+      "four_leaf_clover.png",
+      "squid.png",
+      "eye.png"
+    ],
+    "active_target": "squid.png",
+    "img_size": 40
+  },
+
+  "model": {
+    "n_channels": 16,
+    "update_mlp": {
+      "hidden_dim": 128,
+      "layers": 2
+    },
+    "layer_norm": true,
+    "fire_rate": 0.5
+  },
+  "misc": {
+    "device": "cuda",
+    "seed": 42,
+    "num_workers": 2
+  }
+}
