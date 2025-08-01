@@ -126,7 +126,7 @@ def rollout_regen(model, initial, fire_rate, steps, target, graph_aug=None):
         else:
             x = model(x, fire_rate=fire_rate)
         pred = x[:, :4, :, :][0]  # [4, H, W]
-        m = get_metrics(pred, target)   # <--- only target, not target[0]
+        m = get_metrics(pred, target)   
         metrics.append(m)
     return x, metrics
 
