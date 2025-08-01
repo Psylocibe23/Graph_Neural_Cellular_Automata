@@ -1,3 +1,4 @@
+agnn_env/
 __pycache__/
 *.pyc
 outputs/

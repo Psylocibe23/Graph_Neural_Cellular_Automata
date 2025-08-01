@@ -51,7 +51,7 @@ class GraphAugmentation(nn.Module):
                 offsets.append((dy, dx))
         return offsets
 
-    def forward(self, x):
+    def forward(self, x, return_attention_map=False):
         # x: [B, C, H, W]
         B, C, H, W = x.shape
         device = x.device
@@ -86,11 +86,22 @@ class GraphAugmentation(nn.Module):
         attn_weights = F.softmax(affinities, dim=0)  # [num_neighbors, B, 1, 1, 1]
 
         # Weighted sum of messages
-        agg_message = (messages * attn_weights).sum(dim=0)  # [B, C, H, W]
+        weighted_messages = messages * attn_weights  # [num_neighbors, B, C, H, W]
+        agg_message = weighted_messages.sum(dim=0)  # [B, C, H, W]
 
         # Channel-wise gate (learns for each channel how much to use the mid-range info)
         concat = torch.cat([x, agg_message], dim=1)  # [B, 2C, H, W]
         gate = self.gate_mlp(concat)  # [B, C, H, W], [0,1]
         gated_message = agg_message * gate
+
+        # ---- NEW: Produce a per-pixel attention heatmap ----
+        if return_attention_map:
+            # Take mean absolute value across channels and neighbors
+            # Shape: [num_neighbors, B, C, H, W]
+            attn_map = weighted_messages.abs().mean(dim=2)  # mean over channels, shape [num_neighbors, B, H, W]
+            attn_map = attn_map.sum(dim=0)  # sum over neighbors, shape [B, H, W]
+            # Optionally: normalize to [0, 1] for visualization
+            attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
+            return gated_message, attn_map
 
         return gated_message  # [B, C, H, W]
