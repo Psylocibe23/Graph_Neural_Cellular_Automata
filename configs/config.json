@@ -13,7 +13,7 @@
       "eye.png",
       "real_gecko.png"
     ],
-    "active_target": "gecko.png",
+    "active_target": "heart.png",
     "img_size": 40
   },
 
@@ -33,11 +33,11 @@
 
   "training": {
     "pool_size": 216,
-    "batch_size": 8,
+    "batch_size": 16,
     "steps_per_epoch": 500,
     "nca_steps_min": 32,
-    "nca_steps_max": 64,
-    "num_epochs": 15,
+    "nca_steps_max": 96,
+    "num_epochs": 5,
     "learning_rate": 0.001,
     "optimizer": "Adam",
     "weight_decay": 0.0,
@@ -50,10 +50,10 @@
   "logging": {
     "checkpoint_interval_epochs": 5,
     "log_interval": 50,
-    "save_interval": 200,
+    "save_interval": 20,
     "results_dir": "outputs",
     "checkpoint_dir": "outputs/checkpoints",
-    "visualize_interval": 200
+    "visualize_interval": 20
   },
 
   "misc": {
