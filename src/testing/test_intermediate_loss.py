@@ -6,21 +6,31 @@ from utils.nca_init import make_seed
 from modules.nca import NeuralCA
 from utils.config import load_config
 from utils.image import load_single_target_image
+import torch.nn.functional as F
+
 
 def save_img(img, path, upscale=4):
-    # Save RGBA image, upscaled
+    # Save RGBA image, upscaled, masking out dead cells (alpha < 0.1)
     if hasattr(img, "detach"):
         img = img.detach().cpu()
     if img.ndim == 4:
         img = img[0]
-    img = img[:4].permute(1,2,0).numpy().clip(0,1)
+    img_np = img[:4].permute(1, 2, 0).numpy().copy()  # [H,W,4]
+    alpha = img_np[..., 3:4]
+    mask = (alpha > 0.1).astype(np.float32)
+    img_np[..., :3] *= mask
+    img_np[..., 3:] = mask
+
+    # Upscale AFTER masking, using torch
     if upscale > 1:
-        import torch.nn.functional as F
-        img_t = torch.tensor(img).permute(2,0,1).unsqueeze(0)
+        img_t = torch.tensor(img_np).permute(2,0,1).unsqueeze(0)  # [1,4,H,W]
         img_t = F.interpolate(img_t, scale_factor=upscale, mode='bilinear', align_corners=False)[0]
-        img = img_t.permute(1,2,0).numpy()
-        img = np.clip(img,0,1)
-    plt.imsave(path, img)
+        img_np = img_t.permute(1,2,0).numpy()
+        img_np = np.clip(img_np, 0, 1)
+
+    assert img_np.ndim == 3 and img_np.shape[2] in (3,4), f"Got shape {img_np.shape}"
+    plt.imsave(path, img_np)
+
 
 def main():
     # --- SETTINGS ---

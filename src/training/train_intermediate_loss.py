@@ -31,6 +31,22 @@ def masked_loss(pred, target):
     loss = mse.sum() / (alive_mask.sum() + 1e-8)
     return loss
 
+def save_debug_canvas(state, path, idx=0):
+    # Save RGB and alpha channel of sample idx from a batch state
+    with torch.no_grad():
+        img = state[idx, :3].detach().cpu().clamp(0,1)
+        alpha = state[idx, 3].detach().cpu().numpy()
+        fig, axs = plt.subplots(1, 2, figsize=(8, 4))
+        axs[0].imshow(img.permute(1, 2, 0).numpy())
+        axs[0].set_title('RGB')
+        axs[1].imshow(alpha, cmap='gray', vmin=0, vmax=1)
+        axs[1].set_title('Alpha channel')
+        for ax in axs:
+            ax.axis('off')
+        plt.tight_layout()
+        plt.savefig(path)
+        plt.close(fig)
+
 def main():
     start_time = time.time()
     config = load_config("configs/config.json")
@@ -47,19 +63,15 @@ def main():
     config["logging"]["results_dir"] = results_dir
     config["logging"]["checkpoint_dir"] = ckpt_dir
 
-    # Device
     device = config["misc"]["device"]
     torch.manual_seed(config["misc"]["seed"])
 
-    # Load target
     target = load_single_target_image(config).to(device)  # [4, H, W]
     img_size = config["data"]["img_size"]
     n_channels = config["model"]["n_channels"]
 
-    # TensorBoard
     writer = SummaryWriter(log_dir=tb_dir)
 
-    # Seed pool
     def seed_fn(batch_size=1):
         return make_seed(n_channels, img_size, batch_size, device)
 
@@ -89,14 +101,12 @@ def main():
     logs_dir = os.path.join(base_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
-    # ---- Initialize lists for logging ----
     epoch_losses = []
     pixel_scores = []
     ssim_scores = []
     psnr_scores = []
 
-    # Pool reset settings
-    reset_prob = 0.5    # Reset 50% of batch to seed each batch step (recommended)
+    reset_prob = 0.7  # Increase for stricter training
     tol = 0.05
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
@@ -106,16 +116,27 @@ def main():
         epoch_ssim_scores = []
         epoch_psnr_scores = []
 
+        last_reset_indices = None  # Track indices reset at *this* batch
+
         for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
             idx, batch = pool.sample(batch_size)
             batch = batch.to(device)
 
-            # Reset 50% of pool to seed at every batch
             reset_mask = torch.rand(batch_size, device=device) < reset_prob
             if reset_mask.any():
                 batch[reset_mask] = seed_fn(reset_mask.sum().item())
+                last_reset_indices = torch.nonzero(reset_mask, as_tuple=False).flatten().tolist()
+            else:
+                last_reset_indices = None
 
-            # Random rollout for each sample
+            # Save the state of a reset canvas for debugging (at first batch in epoch)
+            if last_reset_indices and step == 0:
+                reset_idx = last_reset_indices[0]
+                debug_path = os.path.join(inter_dir, f"epoch{epoch}_reset_{reset_idx}_canvas.png")
+                save_debug_canvas(batch, debug_path, idx=reset_idx)
+                print(f"Saved seed canvas for reset sample {reset_idx} at epoch {epoch} to {debug_path}")
+
+            # NCA Rollout
             nca_steps = torch.randint(nca_steps_min, nca_steps_max + 1, (batch_size,), device=device)
             state = batch.clone()
             max_steps = nca_steps.max().item()
@@ -131,7 +152,7 @@ def main():
             optimizer.step()
             pool.replace(idx, state)
 
-            # Visualization of alpha channel
+            # Visualization of alpha channel (main images, as before)
             if (step + 1) % visualize_interval == 0:
                 img = pred[0, :3].detach().cpu().clamp(0, 1)
                 alpha = pred[0, 3].detach().cpu().numpy()
@@ -145,9 +166,7 @@ def main():
                 plt.tight_layout()
                 plt.savefig(os.path.join(results_dir, f"epoch{epoch}_step{step+1}_alpha_debug.png"))
                 plt.close(fig)
-                print(f"Saved RGB and alpha debug image at epoch {epoch}, step {step+1}")
 
-            # Metrics: still on *all* pixels for reporting (not for supervision!)
             pred_img = pred[0].detach().cpu().numpy()
             target_img = target.cpu().numpy()
             diff = np.abs(pred_img[:4] - target_img[:4])
@@ -159,26 +178,21 @@ def main():
             epoch_psnr_scores.append(psnr(pred_np, target_np, data_range=1.0))
             avg_loss += loss.item()
 
-            # TensorBoard logging per step
             global_step = (epoch - 1) * steps_per_epoch + step
             writer.add_scalar('Loss/train', loss.item(), global_step)
             if (step+1) % visualize_interval == 0:
                 img = pred[0, :3].detach().cpu().clamp(0,1)
                 writer.add_image('Predicted/sample', img, global_step)
 
-            # Print progress
             if (step+1) % log_interval == 0:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                       f"Loss: {loss.item():.5f}")
 
-            # Save sample grid image
             if (step+1) % visualize_interval == 0:
                 save_path = os.path.join(results_dir, f"epoch{epoch}_step{step+1}.png")
                 save_grid_as_image(state[0], save_path)
-                print(f"Saved sample grid to {save_path}")
                 save_comparison(target, pred[0], f"{epoch}_step{step+1}", results_dir, upscale=4)
-                print(f"Saved comparison image at epoch {epoch}, step {step+1}")
 
         avg_loss /= steps_per_epoch
         epoch_losses.append(avg_loss)
@@ -189,7 +203,6 @@ def main():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
               f"Average loss: {avg_loss:.6f}")
 
-        # Save model checkpoint at interval
         ckpt_interval = config["logging"].get("checkpoint_interval_epochs", 5)
         if epoch % ckpt_interval == 0 or epoch == total_epochs:
             ckpt_path = os.path.join(ckpt_dir, f"nca_epoch{epoch}.pt")

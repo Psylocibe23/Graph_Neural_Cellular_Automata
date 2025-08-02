@@ -50,7 +50,8 @@ class NeuralCA(nn.Module):
         neighbor_mask = self.neighbor_alive_mask(x)
         alpha = alpha * neighbor_mask
         alpha = alpha * (alpha > 0.1).float()
-    
+        # zero-out RGB for dead cells
+        rgb = rgb * (alpha > 0.1).float()
         # Re-assemble the tensor
         x = torch.cat([rgb, alpha, x[:, 4:, :, :]], dim=1) if x.shape[1] > 4 else torch.cat([rgb, alpha], dim=1)
         if self.ln:
