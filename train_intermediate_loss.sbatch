@@ -27,7 +27,7 @@ mkdir -p logs
 mkdir -p outputs
 
 # Run training script
-python src/training/train_intermediate_loss.py
+PYTHONPATH=src python src/training/train_intermediate_loss.py
 
 # Print completion info
 echo "Job finished at: $(date)"
