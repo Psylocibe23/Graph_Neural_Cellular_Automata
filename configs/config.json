@@ -35,7 +35,7 @@
     "pool_size": 216,
     "batch_size": 16,
     "steps_per_epoch": 500,
-    "nca_steps_min": 48,
+    "nca_steps_min": 0,
     "nca_steps_max": 96,
     "num_epochs": 5,
     "learning_rate": 0.001,

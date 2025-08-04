@@ -106,7 +106,7 @@ def main():
     ssim_scores = []
     psnr_scores = []
 
-    reset_prob = 0.7  # Increase for stricter training
+    reset_prob = 1.0  # Increase for stricter training
     tol = 0.05
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
@@ -128,6 +128,14 @@ def main():
                 last_reset_indices = torch.nonzero(reset_mask, as_tuple=False).flatten().tolist()
             else:
                 last_reset_indices = None
+
+            # Force batch[0] to always be a pure seed!
+            batch[0] = seed_fn(1)[0]
+            if last_reset_indices is None:
+                last_reset_indices = [0]
+            else:
+                if 0 not in last_reset_indices:
+                    last_reset_indices.insert(0, 0)
 
             # Save the state of a reset canvas for debugging (at first batch in epoch)
             if last_reset_indices and step == 0:
