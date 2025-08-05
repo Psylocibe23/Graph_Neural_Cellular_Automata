@@ -49,7 +49,6 @@ def main():
     model = NeuralCA(
         n_channels=n_channels,
         update_hidden=config["model"]["update_mlp"]["hidden_dim"],
-        update_layers=config["model"]["update_mlp"]["layers"],
         layer_norm=config["model"]["layer_norm"],
         img_size=img_size,
         device=device

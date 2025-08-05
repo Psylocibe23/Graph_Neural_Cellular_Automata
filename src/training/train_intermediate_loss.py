@@ -26,10 +26,12 @@ def save_grid_as_image(grid, filename):
     plt.imsave(filename, img)
 
 def masked_loss(pred, target):
+    # pred: [B, 4, H, W], target: [B, 4, H, W]
     alive_mask = (pred[:, 3:4, :, :] > 0.1).float()
     mse = ((pred - target) ** 2) * alive_mask
-    loss = mse.sum() / (alive_mask.sum() + 1e-8)
-    return loss
+    # sum over channel, height, width; mean over batch
+    per_sample_loss = mse.sum(dim=(1,2,3)) / (alive_mask.sum(dim=(1,2,3)) + 1e-8)  # [B]
+    return per_sample_loss
 
 def save_debug_canvas(state, path, idx=0):
     # Save RGB and alpha channel of sample idx from a batch state
@@ -78,7 +80,6 @@ def main():
     model = NeuralCA(
         n_channels=n_channels,
         update_hidden=config["model"]["update_mlp"]["hidden_dim"],
-        update_layers=config["model"]["update_mlp"]["layers"],
         layer_norm=config["model"]["layer_norm"],
         img_size=img_size,
         device=device
@@ -116,67 +117,39 @@ def main():
         epoch_ssim_scores = []
         epoch_psnr_scores = []
 
-        last_reset_indices = None  # Track indices reset at *this* batch
-
         for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
             idx, batch = pool.sample(batch_size)
             batch = batch.to(device)
 
-            reset_mask = torch.rand(batch_size, device=device) < reset_prob
-            if reset_mask.any():
-                batch[reset_mask] = seed_fn(reset_mask.sum().item())
-                last_reset_indices = torch.nonzero(reset_mask, as_tuple=False).flatten().tolist()
-            else:
-                last_reset_indices = None
-
-            # Force batch[0] to always be a pure seed!
-            batch[0] = seed_fn(1)[0]
-            if last_reset_indices is None:
-                last_reset_indices = [0]
-            else:
-                if 0 not in last_reset_indices:
-                    last_reset_indices.insert(0, 0)
-
-            # Save the state of a reset canvas for debugging (at first batch in epoch)
-            if last_reset_indices and step == 0:
-                reset_idx = last_reset_indices[0]
-                debug_path = os.path.join(inter_dir, f"epoch{epoch}_reset_{reset_idx}_canvas.png")
-                save_debug_canvas(batch, debug_path, idx=reset_idx)
-                print(f"Saved seed canvas for reset sample {reset_idx} at epoch {epoch} to {debug_path}")
-
-            # NCA Rollout
-            nca_steps = torch.randint(nca_steps_min, nca_steps_max + 1, (batch_size,), device=device)
+            # NCA rollout with random steps per sample
+            nca_steps = torch.randint(nca_steps_min, nca_steps_max+1, (batch_size,), device=device)
             state = batch.clone()
             max_steps = nca_steps.max().item()
-            for t in range(1, max_steps + 1):
+            for t in range(1, max_steps+1):
                 state = model(state, fire_rate=fire_rate)
 
-            pred = state[:, :4]
-            target_expand = target.unsqueeze(0).expand_as(pred)
-            loss = masked_loss(pred, target_expand)
+            # Target shape: [4, H, W]; Expand to [B, 4, H, W]
+            target_expand = target.unsqueeze(0).expand_as(state[:, :4])
+
+            # Masked per-sample loss
+            per_sample_loss = masked_loss(state[:, :4], target_expand)  # shape [B]
+            loss = per_sample_loss.mean()
+
+            # Reset *the sample with highest loss* in the batch to a fresh seed
+            max_loss_idx = torch.argmax(per_sample_loss).item()
+            state[max_loss_idx] = seed_fn(1)[0]
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             pool.replace(idx, state)
 
-            # Visualization of alpha channel (main images, as before)
-            if (step + 1) % visualize_interval == 0:
-                img = pred[0, :3].detach().cpu().clamp(0, 1)
-                alpha = pred[0, 3].detach().cpu().numpy()
-                fig, axs = plt.subplots(1, 2, figsize=(8, 4))
-                axs[0].imshow(img.permute(1, 2, 0).numpy())
-                axs[0].set_title('RGB')
-                axs[1].imshow(alpha, cmap='gray', vmin=0, vmax=1)
-                axs[1].set_title('Alpha channel')
-                for ax in axs:
-                    ax.axis('off')
-                plt.tight_layout()
-                plt.savefig(os.path.join(results_dir, f"epoch{epoch}_step{step+1}_alpha_debug.png"))
-                plt.close(fig)
-
+            # --- Logging and visualization (unchanged) ---
+            pred = state[:, :4]
             pred_img = pred[0].detach().cpu().numpy()
             target_img = target.cpu().numpy()
+            tol = 0.05
             diff = np.abs(pred_img[:4] - target_img[:4])
             pixel_perfect = (diff < tol).all(axis=0).mean()
             epoch_pixel_scores.append(float(pixel_perfect))
@@ -191,12 +164,14 @@ def main():
             if (step+1) % visualize_interval == 0:
                 img = pred[0, :3].detach().cpu().clamp(0,1)
                 writer.add_image('Predicted/sample', img, global_step)
+                # Optionally save alpha debug etc.
 
             if (step+1) % log_interval == 0:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                       f"Loss: {loss.item():.5f}")
 
+            # (Optional) Save grid images for debugging
             if (step+1) % visualize_interval == 0:
                 save_path = os.path.join(results_dir, f"epoch{epoch}_step{step+1}.png")
                 save_grid_as_image(state[0], save_path)
@@ -211,6 +186,7 @@ def main():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
               f"Average loss: {avg_loss:.6f}")
 
+        # Save checkpoint
         ckpt_interval = config["logging"].get("checkpoint_interval_epochs", 5)
         if epoch % ckpt_interval == 0 or epoch == total_epochs:
             ckpt_path = os.path.join(ckpt_dir, f"nca_epoch{epoch}.pt")
@@ -221,6 +197,7 @@ def main():
                 "config": config,
             }, ckpt_path)
             print(f"Model checkpoint saved to {ckpt_path}")
+
 
     writer.close()
     log_data = {
