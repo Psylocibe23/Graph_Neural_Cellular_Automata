@@ -13,7 +13,7 @@
       "eye.png",
       "real_gecko.png"
     ],
-    "active_target": "four_leaf_clover.png",
+    "active_target": "gecko.png",
     "img_size": 40
   },
 
@@ -48,7 +48,7 @@
   },
 
   "logging": {
-    "checkpoint_interval_epochs": 100,
+    "checkpoint_interval_epochs": 50,
     "log_interval": 500,
     "save_interval": 1000,
     "results_dir": "outputs",

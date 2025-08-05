@@ -1,4 +1,5 @@
 import os
+import glob
 import torch
 import json
 import numpy as np
@@ -110,8 +111,21 @@ def main():
     reset_prob = 1.0  # Increase for stricter training
     tol = 0.05
 
+    ckpt_dir = config["logging"]["checkpoint_dir"]
+    ckpt_files = sorted(glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt")))
+    if ckpt_files:
+        last_ckpt = ckpt_files[-1]
+        checkpoint = torch.load(last_ckpt, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"Resuming from checkpoint {last_ckpt} (epoch {checkpoint['epoch']})")
+    else:
+        start_epoch = 1
+        print("Starting training from scratch.")
+
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
-    for epoch in trange(1, total_epochs + 1, desc="Epochs"):
+    for epoch in trange(start_epoch, total_epochs + 1, desc="Epochs"):
         avg_loss = 0.0
         epoch_pixel_scores = []
         epoch_ssim_scores = []
