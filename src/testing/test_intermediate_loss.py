@@ -41,7 +41,7 @@ def main():
     steps = 50
     upscale = 4
     target_name = os.path.splitext(config["data"]["active_target"])[0]
-    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch5.pt"
+    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch50.pt"
     save_dir = f"outputs/classic_nca/test_growth/{target_name}"
     os.makedirs(save_dir, exist_ok=True)
 

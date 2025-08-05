@@ -48,7 +48,7 @@
   },
 
   "logging": {
-    "checkpoint_interval_epochs": 50,
+    "checkpoint_interval_epochs": 25,
     "log_interval": 500,
     "save_interval": 1000,
     "results_dir": "outputs",
