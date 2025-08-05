@@ -35,10 +35,38 @@ def make_video(growth_dir, attn_dir, out_path, fps=12):
     out.release()
     print(f"Saved video to {out_path}")
 
+def make_video_growth_only(growth_dir, out_path, fps=12):
+    # Get sorted frame list
+    growth_frames = natsorted(glob.glob(os.path.join(growth_dir, 'frame_*.png')))
+    num_frames = len(growth_frames)
+    assert num_frames > 0, "No frames found!"
+    img_g = cv2.imread(growth_frames[0])
+    height = img_g.shape[0]
+    width = img_g.shape[1]
+
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
+
+    for gf in growth_frames:
+        img_g = cv2.imread(gf)
+        out.write(img_g)
+    out.release()
+    print(f"Saved video to {out_path}")
+
+
+
+
+    
+
 if __name__ == "__main__":
     # Adjust these paths as needed
-    base_dir = "outputs/graph_augmented/growth_video/gecko_graphaug"
-    growth_dir = base_dir
-    attn_dir = os.path.join(base_dir, "attention")
-    out_path = os.path.join(base_dir, "side_by_side.mp4")
-    make_video(growth_dir, attn_dir, out_path, fps=12)
+    #base_dir = "outputs/graph_augmented/growth_video/gecko_graphaug"
+    #growth_dir = base_dir
+    #attn_dir = os.path.join(base_dir, "attention")
+    #out_path = os.path.join(base_dir, "side_by_side.mp4")
+    #make_video(growth_dir, attn_dir, out_path, fps=12)
+
+    base_dir = "outputs/classic_nca/test_growth/gecko"
+    out_path = os.path.join(base_dir, "growth.mp4")
+    make_video_growth_only(base_dir, out_path, fps=12)

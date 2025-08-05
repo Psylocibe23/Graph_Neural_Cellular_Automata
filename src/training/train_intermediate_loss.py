@@ -108,7 +108,7 @@ def main():
     ssim_scores = []
     psnr_scores = []
 
-    reset_prob = 1.0  # Increase for stricter training
+    reset_prob = 0.5  # Increase for stricter training
     tol = 0.05
 
     ckpt_dir = config["logging"]["checkpoint_dir"]
@@ -149,9 +149,10 @@ def main():
             per_sample_loss = masked_loss(state[:, :4], target_expand)  # shape [B]
             loss = per_sample_loss.mean()
 
-            # Reset *the sample with highest loss* in the batch to a fresh seed
-            max_loss_idx = torch.argmax(per_sample_loss).item()
-            state[max_loss_idx] = seed_fn(1)[0]
+            # Reset % of batch to a fresh seed
+            reset_mask = torch.rand(batch_size, device=device) < reset_prob
+            if reset_mask.any():
+                state[reset_mask] = seed_fn(reset_mask.sum().item())
 
             optimizer.zero_grad()
             loss.backward()
@@ -159,7 +160,7 @@ def main():
             optimizer.step()
             pool.replace(idx, state)
 
-            # --- Logging and visualization (unchanged) ---
+            # --- Logging and visualization ---
             pred = state[:, :4]
             pred_img = pred[0].detach().cpu().numpy()
             target_img = target.cpu().numpy()

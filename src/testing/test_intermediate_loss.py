@@ -38,7 +38,7 @@ def main():
     device = config["misc"]["device"]
     n_channels = config["model"]["n_channels"]
     img_size = config["data"]["img_size"]
-    steps = 50
+    steps = 200
     upscale = 4
     target_name = os.path.splitext(config["data"]["active_target"])[0]
     ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch50.pt"
