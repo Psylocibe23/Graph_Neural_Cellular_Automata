@@ -187,9 +187,13 @@ def main():
 
             # (Optional) Save grid images for debugging
             if (step+1) % visualize_interval == 0:
-                save_path = os.path.join(results_dir, f"epoch{epoch}_step{step+1}.png")
-                save_grid_as_image(state[0], save_path)
-                save_comparison(target, pred[0], f"{epoch}_step{step+1}", results_dir, upscale=4)
+                save_path0 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
+                save_path1 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample1.png")
+                save_grid_as_image(state[0], save_path0)
+                save_grid_as_image(state[1], save_path1)
+                save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
+                save_comparison(target, pred[1], f"{epoch}_step{step+1}_sample1", results_dir, upscale=4)
+
 
         avg_loss /= steps_per_epoch
         epoch_losses.append(avg_loss)
