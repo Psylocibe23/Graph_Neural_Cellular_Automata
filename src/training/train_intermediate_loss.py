@@ -120,7 +120,7 @@ def main():
     ssim_scores = []
     psnr_scores = []
 
-    reset_prob = 0.2  # Fraction of batch to reset (reset the worst loss samples)
+    reset_prob = 0.1  # Fraction of batch to reset (reset the worst loss samples)
     tol = 0.05
 
     ckpt_dir = config["logging"]["checkpoint_dir"]

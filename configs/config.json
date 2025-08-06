@@ -27,7 +27,7 @@
       "hidden_dim": 128,
       "layers": 2
     },
-    "layer_norm": true,
+    "layer_norm": false,
     "fire_rate": 0.5
   },
 
