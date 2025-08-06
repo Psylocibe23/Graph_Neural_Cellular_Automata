@@ -148,6 +148,10 @@ def main():
             # Masked per-sample loss
             per_sample_loss = masked_loss(state[:, :4], target_expand)  # shape [B]
             loss = per_sample_loss.mean()
+            if not torch.isfinite(loss) or loss.item() > 1e4:  # Threshold can be adjusted
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid or exploding loss: {loss.item()} at epoch {epoch}, step {step+1}. Exiting.")
+                exit(1)
+
 
             # Reset % of batch to a fresh seed
             reset_mask = torch.rand(batch_size, device=device) < reset_prob
