@@ -120,7 +120,7 @@ def main():
     ssim_scores = []
     psnr_scores = []
 
-    reset_prob = 0.5  # Fraction of batch to reset (reset the worst loss samples)
+    reset_prob = 0.2  # Fraction of batch to reset (reset the worst loss samples)
     tol = 0.05
 
     ckpt_dir = config["logging"]["checkpoint_dir"]
@@ -158,8 +158,10 @@ def main():
             nca_steps = torch.randint(nca_steps_min, nca_steps_max+1, (batch_size,), device=device)
             state = batch.clone()
             max_steps = nca_steps.max().item()
-            for t in range(1, max_steps+1):
-                state = model(state, fire_rate=fire_rate)
+            for t in range(max_steps):
+                mask = (nca_steps > t)
+                if mask.any():
+                    state[mask] = model(state[mask], fire_rate=fire_rate)
 
             # Target shape: [4, H, W]; Expand to [B, 4, H, W]
             target_expand = target.unsqueeze(0).expand_as(state[:, :4])
@@ -177,7 +179,7 @@ def main():
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             optimizer.step()
             pool.replace(idx, state)
 
