@@ -18,6 +18,7 @@ from torch.utils.tensorboard import SummaryWriter
 from utils.utility_functions import count_parameters
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
+import re
 
 def save_grid_as_image(grid, filename):
     grid = grid.detach().cpu()
@@ -123,8 +124,15 @@ def main():
     tol = 0.05
 
     ckpt_dir = config["logging"]["checkpoint_dir"]
-    ckpt_files = sorted(glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt")))
+    def extract_epoch_num(ckpt_filename):
+        # Expects filenames like 'nca_epoch100.pt'
+        m = re.search(r'epoch(\d+)', ckpt_filename)
+        return int(m.group(1)) if m else -1
+    
+    ckpt_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
     if ckpt_files:
+        # Sort by extracted epoch number
+        ckpt_files = sorted(ckpt_files, key=extract_epoch_num)
         last_ckpt = ckpt_files[-1]
         checkpoint = torch.load(last_ckpt, map_location=device)
         model.load_state_dict(checkpoint["model_state"])

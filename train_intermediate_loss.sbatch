@@ -19,9 +19,6 @@ module load cuda/11.8
 # Activate your Python 3.10 venv
 source /orfeo/scratch/dssc/fspreafichi/Graph_Neural_Cellular_Automata/graph_nca_py310_env/bin/activate
 
-# Print python and torch version for sanity check
-python -c "import sys, torch; print('Python:', sys.executable); print('PyTorch:', torch.__version__, 'CUDA:', torch.cuda.is_available())"
-
 # Create logs dir if not exists
 mkdir -p logs
 mkdir -p outputs
