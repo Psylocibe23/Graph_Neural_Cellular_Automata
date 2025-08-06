@@ -128,7 +128,7 @@ def main():
         # Expects filenames like 'nca_epoch100.pt'
         m = re.search(r'epoch(\d+)', ckpt_filename)
         return int(m.group(1)) if m else -1
-    
+
     ckpt_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
     if ckpt_files:
         # Sort by extracted epoch number
@@ -167,9 +167,6 @@ def main():
             # Masked per-sample loss
             per_sample_loss = masked_loss(state[:, :4], target_expand)  # shape [B]
             loss = per_sample_loss.mean()
-            if not torch.isfinite(loss) or loss.item() > 1e4:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid or exploding loss: {loss.item()} at epoch {epoch}, step {step+1}. Exiting.")
-                exit(1)
 
             # --- 2. Reset the worst-loss samples in the batch (not random) ---
             n_reset = int(reset_prob * batch_size)
