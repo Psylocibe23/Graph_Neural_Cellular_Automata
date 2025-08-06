@@ -1,4 +1,5 @@
 import os
+import glob
 import torch
 import json
 import numpy as np
@@ -19,7 +20,6 @@ from utils.utility_functions import count_parameters
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
 
-
 def save_grid_as_image(grid, filename):
     grid = grid.detach().cpu()
     if grid.ndim == 4:
@@ -27,15 +27,20 @@ def save_grid_as_image(grid, filename):
     img = grid[:4].permute(1,2,0).numpy().clip(0,1)
     plt.imsave(filename, img)
 
+def masked_loss(pred, target):
+    alive_mask = (pred[:, 3:4, :, :] > 0.1).float()
+    mse = ((pred - target) ** 2) * alive_mask
+    per_sample_loss = mse.sum(dim=(1,2,3)) / (alive_mask.sum(dim=(1,2,3)) + 1e-8)
+    return per_sample_loss
+
 def main():
     start_time = time.time()
     config = load_config("configs/config.json")
-    # Set up special folder
     active_target_name = os.path.splitext(config["data"]["active_target"])[0]
     base_dir = os.path.join("outputs", "graph_augmented", active_target_name)
     results_dir = os.path.join(base_dir, "images")
     ckpt_dir = os.path.join(base_dir, "checkpoints")
-    tb_dir = os.path.join(base_dir, "tb_logs") 
+    tb_dir = os.path.join(base_dir, "tb_logs")
     os.makedirs(results_dir, exist_ok=True)
     os.makedirs(ckpt_dir, exist_ok=True)
     config["logging"]["results_dir"] = results_dir
@@ -50,11 +55,9 @@ def main():
 
     writer = SummaryWriter(log_dir=tb_dir)
 
-    # Seed function for pool
     def seed_fn(batch_size=1):
         return make_seed(n_channels, img_size, batch_size, device)
 
-    # Build NCA (classic) and graph augmentation module
     model = NeuralCA(
         n_channels=n_channels,
         update_hidden=config["model"]["update_mlp"]["hidden_dim"],
@@ -64,7 +67,6 @@ def main():
         device=device
     ).to(device)
 
-    # --- Graph augmentation hyperparameters ---
     graph_aug = GraphAugmentation(
         n_channels=n_channels,
         d_model=config.get("graph_augmentation", {}).get("d_model", 16),
@@ -73,9 +75,11 @@ def main():
         gating_hidden=config.get("graph_augmentation", {}).get("gating_hidden", 32)
     ).to(device)
 
+    # --- Optimizer with weight decay from config ---
     optimizer = torch.optim.Adam(
         list(model.parameters()) + list(graph_aug.parameters()),
-        lr=config["training"]["learning_rate"]
+        lr=config["training"]["learning_rate"],
+        weight_decay=config["training"]["weight_decay"]
     )
 
     pool = SamplePool(config["training"]["pool_size"], seed_fn, device=device)
@@ -87,21 +91,33 @@ def main():
     nca_steps_max = config["training"]["nca_steps_max"]
     fire_rate = config["model"]["fire_rate"]
     log_interval = config["logging"]["log_interval"]
-    save_interval = config["logging"]["save_interval"]
     visualize_interval = config["logging"]["visualize_interval"]
 
     logs_dir = os.path.join(base_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
 
-    # 9. Metrics recording
     pixel_scores = []
     epoch_losses = []
     ssim_scores = []
     psnr_scores = []
-    tol = 0.05  # Tolerance for pixel perfection score
+    tol = 0.05
+
+    # ----------- CHECKPOINT LOADING (optional, see classic version) -----------
+    ckpt_files = sorted(glob.glob(os.path.join(ckpt_dir, "nca_graphaug_epoch*.pt")))
+    if ckpt_files:
+        last_ckpt = ckpt_files[-1]
+        checkpoint = torch.load(last_ckpt, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        graph_aug.load_state_dict(checkpoint["graph_aug_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start_epoch = checkpoint["epoch"] + 1
+        print(f"Resuming from checkpoint {last_ckpt} (epoch {checkpoint['epoch']})")
+    else:
+        start_epoch = 1
+        print("Starting training from scratch.")
 
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
-    for epoch in trange(1, total_epochs + 1, desc="Epochs"):
+    for epoch in trange(start_epoch, total_epochs + 1, desc="Epochs"):
         avg_loss = 0.0
         epoch_pixel_scores = []
         epoch_ssim_scores = []
@@ -109,19 +125,40 @@ def main():
         for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
             idx, batch = pool.sample(batch_size)
             batch = batch.to(device)
-            nca_steps = torch.randint(nca_steps_min, nca_steps_max+1, (1,)).item()
-            for _ in range(nca_steps):
-                # Classic: batch = model(batch, fire_rate=fire_rate)
-                # Augmented: add graph message before NCA update
-                graph_message = graph_aug(batch)
-                batch = model(batch + graph_message, fire_rate=fire_rate)  # add the gated mid-range message
-            pred = batch[:, :4, :, :]
+            # --- Random steps per sample, for each batch element
+            nca_steps = torch.randint(nca_steps_min, nca_steps_max + 1, (batch_size,), device=device)
+            state = batch.clone()
+            max_steps = nca_steps.max().item()
+            for t in range(1, max_steps + 1):
+                # For each sample in batch, apply update only if within its nca_steps count
+                mask = nca_steps >= t
+                if mask.any():
+                    # Only update the active samples
+                    update_input = state[mask]
+                    graph_message = graph_aug(update_input)
+                    state[mask] = model(update_input + graph_message, fire_rate=fire_rate)
+            pred = state[:, :4]
             target_expand = target.unsqueeze(0).expand_as(pred)
-            loss = F.mse_loss(pred, target_expand)
+            per_sample_loss = masked_loss(pred, target_expand)
+            loss = per_sample_loss.mean()
+            if not torch.isfinite(loss) or loss.item() > 1e4:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid or exploding loss: {loss.item()} at epoch {epoch}, step {step+1}. Exiting.")
+                exit(1)
+
+            # --- Reset *worst loss* samples, not random ---
+            reset_prob = 0.5
+            num_reset = int(reset_prob * batch_size)
+            if num_reset > 0:
+                # Get indices of worst-loss samples
+                _, worst_idx = torch.topk(per_sample_loss, num_reset)
+                state[worst_idx] = seed_fn(num_reset)
+
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + list(graph_aug.parameters()), 1.0)
             optimizer.step()
-            # Record metrics
+            pool.replace(idx, state)
+
             pred_img = pred[0].detach().cpu().numpy()
             target_img = target.cpu().numpy()
             diff = np.abs(pred_img[:4] - target_img[:4])
@@ -131,28 +168,22 @@ def main():
             target_np = target[:3].cpu().permute(1,2,0).numpy().clip(0, 1)
             epoch_ssim_scores.append(ssim(pred_np, target_np, data_range=1.0, channel_axis=-1))
             epoch_psnr_scores.append(psnr(pred_np, target_np, data_range=1.0))
-            pool.replace(idx, batch)
             avg_loss += loss.item()
 
-            # --- TensorBoard logging per step ---
             global_step = (epoch - 1) * steps_per_epoch + step
             writer.add_scalar('Loss/train', loss.item(), global_step)
-            # log sample prediction as image (every so often)
             if (step+1) % visualize_interval == 0:
-                img = pred[0, :3].detach().cpu().clamp(0,1)  # RGB only
+                img = pred[0, :3].detach().cpu().clamp(0,1)
                 writer.add_image('Predicted/sample', img, global_step)
+                save_path = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
+                save_grid_as_image(state[0], save_path)
+                save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
 
             if (step+1) % log_interval == 0:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                       f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                       f"Loss: {loss.item():.5f}")
-            if (step+1) % visualize_interval == 0:
-                save_path = os.path.join(config["logging"]["results_dir"],
-                                         f"epoch{epoch}_step{step+1}.png")
-                save_grid_as_image(batch[0], save_path)
-                print(f"Saved sample grid to {save_path}")
-                save_comparison(target, pred[0], f"{epoch}_step{step+1}", config["logging"]["results_dir"], upscale=4)
-                print(f"Saved comparison image at epoch {epoch}, step {step+1}")
+
         avg_loss /= steps_per_epoch
         epoch_losses.append(avg_loss)
         pixel_scores.append(float(np.mean(epoch_pixel_scores)))
@@ -179,7 +210,7 @@ def main():
     log_data = {
         "training_time_minutes": (time.time() - start_time)/60,
         "config": config,
-        "parameter_count": count_parameters(model) + (count_parameters(graph_aug) if "graph_aug" in locals() else 0),
+        "parameter_count": count_parameters(model) + count_parameters(graph_aug),
         "graph_augmentation_parameters": count_parameters(graph_aug),
         "seed": config["misc"].get("seed"),
         "initial_loss": float(epoch_losses[0]) if epoch_losses else None,

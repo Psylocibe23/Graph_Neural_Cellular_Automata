@@ -40,7 +40,7 @@
     "num_epochs": 1000,
     "learning_rate": 0.001,
     "optimizer": "Adam",
-    "weight_decay": 0.0,
+    "weight_decay": 1e-5,
     "scheduler": null,
     "gradient_clip": 1.0,
     "loss": "mse",
@@ -59,7 +59,7 @@
   "misc": {
     "device": "cuda",
     "seed": 42,
-    "num_workers": 2
+    "num_workers": 8
   },
 
   "graph_augmentation": {

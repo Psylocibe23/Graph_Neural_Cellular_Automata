@@ -30,12 +30,10 @@ def masked_loss(pred, target):
     # pred: [B, 4, H, W], target: [B, 4, H, W]
     alive_mask = (pred[:, 3:4, :, :] > 0.1).float()
     mse = ((pred - target) ** 2) * alive_mask
-    # sum over channel, height, width; mean over batch
     per_sample_loss = mse.sum(dim=(1,2,3)) / (alive_mask.sum(dim=(1,2,3)) + 1e-8)  # [B]
     return per_sample_loss
 
 def save_debug_canvas(state, path, idx=0):
-    # Save RGB and alpha channel of sample idx from a batch state
     with torch.no_grad():
         img = state[idx, :3].detach().cpu().clamp(0,1)
         alpha = state[idx, 3].detach().cpu().numpy()
@@ -85,9 +83,22 @@ def main():
         img_size=img_size,
         device=device
     ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["training"]["learning_rate"])
-    nca_param_count = count_parameters(model)
 
+    # --- 1. Optimizer with small weight decay ---
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["training"]["learning_rate"],
+        weight_decay=config["training"]["weight_decay"]
+    )
+
+    # --- 2. Learning rate scheduler ---
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=50,    # decay every 50 epochs
+        gamma=0.7        # decay by 0.8
+    )
+
+    nca_param_count = count_parameters(model)
     pool = SamplePool(config["training"]["pool_size"], seed_fn, device=device)
 
     total_epochs = config["training"]["num_epochs"]
@@ -108,7 +119,7 @@ def main():
     ssim_scores = []
     psnr_scores = []
 
-    reset_prob = 0.5  # Increase for stricter training
+    reset_prob = 0.5  # Fraction of batch to reset (reset the worst loss samples)
     tol = 0.05
 
     ckpt_dir = config["logging"]["checkpoint_dir"]
@@ -148,15 +159,16 @@ def main():
             # Masked per-sample loss
             per_sample_loss = masked_loss(state[:, :4], target_expand)  # shape [B]
             loss = per_sample_loss.mean()
-            if not torch.isfinite(loss) or loss.item() > 1e4:  # Threshold can be adjusted
+            if not torch.isfinite(loss) or loss.item() > 1e4:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Invalid or exploding loss: {loss.item()} at epoch {epoch}, step {step+1}. Exiting.")
                 exit(1)
 
-
-            # Reset % of batch to a fresh seed
-            reset_mask = torch.rand(batch_size, device=device) < reset_prob
-            if reset_mask.any():
-                state[reset_mask] = seed_fn(reset_mask.sum().item())
+            # --- 2. Reset the worst-loss samples in the batch (not random) ---
+            n_reset = int(reset_prob * batch_size)
+            if n_reset > 0:
+                # Get the indices of the worst losses
+                worst_indices = torch.topk(per_sample_loss, n_reset).indices
+                state[worst_indices] = seed_fn(n_reset)
 
             optimizer.zero_grad()
             loss.backward()
@@ -193,12 +205,8 @@ def main():
             # (Optional) Save grid images for debugging
             if (step+1) % visualize_interval == 0:
                 save_path0 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
-                save_path1 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample1.png")
                 save_grid_as_image(state[0], save_path0)
-                save_grid_as_image(state[1], save_path1)
                 save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
-                save_comparison(target, pred[1], f"{epoch}_step{step+1}_sample1", results_dir, upscale=4)
-
 
         avg_loss /= steps_per_epoch
         epoch_losses.append(avg_loss)
@@ -208,6 +216,9 @@ def main():
         writer.add_scalar('Loss/epoch_avg', avg_loss, epoch)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
               f"Average loss: {avg_loss:.6f}")
+
+        # --- 3. Step the LR scheduler at epoch end ---
+        scheduler.step()
 
         # Save checkpoint
         ckpt_interval = config["logging"].get("checkpoint_interval_epochs", 5)
@@ -220,7 +231,6 @@ def main():
                 "config": config,
             }, ckpt_path)
             print(f"Model checkpoint saved to {ckpt_path}")
-
 
     writer.close()
     log_data = {
