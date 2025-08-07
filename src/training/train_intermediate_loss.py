@@ -220,6 +220,20 @@ def main():
         pixel_scores.append(float(np.mean(epoch_pixel_scores)))
         ssim_scores.append(float(np.mean(epoch_ssim_scores)))
         psnr_scores.append(float(np.mean(epoch_psnr_scores)))
+
+        epoch_log = {
+            "epoch": epoch,
+            "avg_loss": float(avg_loss) if isinstance(avg_loss, np.ndarray) else avg_loss,
+            "pixel_perfection": float(np.mean(epoch_pixel_scores)),
+            "ssim": float(np.mean(epoch_ssim_scores)),
+            "psnr": float(np.mean(epoch_psnr_scores)),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        log_path = os.path.join(logs_dir, "training_log.jsonl")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(epoch_log) + "\n")
+            
         writer.add_scalar('Loss/epoch_avg', avg_loss, epoch)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
               f"Average loss: {avg_loss:.6f}")
