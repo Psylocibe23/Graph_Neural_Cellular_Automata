@@ -38,10 +38,10 @@ def main():
     device = config["misc"]["device"]
     n_channels = config["model"]["n_channels"]
     img_size = config["data"]["img_size"]
-    steps = 400
+    steps = 90
     upscale = 4
     target_name = os.path.splitext(config["data"]["active_target"])[0]
-    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch225.pt"
+    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch475.pt"
     save_dir = f"outputs/classic_nca/test_growth/{target_name}"
     os.makedirs(save_dir, exist_ok=True)
 
@@ -68,12 +68,12 @@ def main():
             frame_path = os.path.join(save_dir, f"frame_{t:03d}.png")
             save_img(state[:, :4], frame_path, upscale=upscale)
             all_imgs.append(state[:, :4][0].cpu())
-            state = model(state, fire_rate=1.0)   # fire_rate=1.0 ensures all cells are updated
+            state = model(state, fire_rate=0.5)  
 
     print(f"All growth frames saved to {save_dir}")
 
     # --- DISPLAY A GRID OF SELECTED FRAMES ---
-    select_steps = [1,2,4,8,16,32,49]  # You can change these as you want
+    select_steps = [1,2,4,8,16,32,49] 
     n = len(select_steps)
     plt.figure(figsize=(n*2,2.5))
     for i, step in enumerate(select_steps):

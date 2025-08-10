@@ -19,16 +19,16 @@
 
   "model": {
     "n_channels": 16,
-    "perception": {
-      "sobel": true,
-      "identity": true
-    },
-    "update_mlp": {
-      "hidden_dim": 128,
-      "layers": 2
-    },
+
+    "perception": { "sobel": true, "identity": true },
+
+    "update_mlp": { "hidden_dim": 128, "layers": 2 },
+
     "layer_norm": false,
-    "fire_rate": 0.5
+    "fire_rate": 0.5,      
+    "update_gain": 0.1,    
+    "alpha_thr": 0.1,                  
+    "use_groupnorm": true             
   },
 
   "training": {
@@ -37,14 +37,33 @@
     "steps_per_epoch": 800,
     "nca_steps_min": 48,
     "nca_steps_max": 80,
+    "long_rollout_prob": 0.25,
+    "long_rollout_steps_min": 200,
+    "long_rollout_steps_max": 400,
+    "fire_rate_min": 0.5,
+    "fire_rate_max": 1.0,
+
     "num_epochs": 1000,
     "learning_rate": 0.0005,
     "optimizer": "Adam",
     "weight_decay": 1e-5,
-    "scheduler": null,
     "gradient_clip": 1.0,
-    "loss": "mse",
-    "damage_patch_size": 10
+    "loss": "masked_target_mse",
+    "loss_alpha_thr": 0.2,
+    "loss_lam_area": 5e-5,
+    "stability_enabled": true,
+    "stability_K": 24,
+    "stability_threshold": 0.01,
+    "stability_weight": 0.5,
+    "reset_worst_prob": 0.10, 
+    "random_reseed_prob": 0.05, 
+    "damage_patch_size": 10,
+    "damage_prob": 0.30,
+    "scheduler": {
+      "type": "StepLR",
+      "step_size": 50,
+      "gamma": 0.7
+    }
   },
 
   "logging": {
