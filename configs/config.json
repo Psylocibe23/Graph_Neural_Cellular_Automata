@@ -85,6 +85,10 @@
     "d_model": 16,
     "attention_radius": 3,
     "num_neighbors": 8,
-    "gating_hidden": 32
+    "gating_hidden": 32,
+    "message_gain": 0.5,  
+    "hidden_only": true,   
+    "message_rate": 0.5,  
+    "message_every": 1    
   }
 }
