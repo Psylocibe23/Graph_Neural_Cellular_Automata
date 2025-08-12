@@ -1,46 +1,44 @@
 #!/bin/bash
-#SBATCH --job-name=graph_nca
-#SBATCH --output=logs/train_graph_%j.out
-#SBATCH --error=logs/train_graph_%j.err
+#SBATCH --job-name=graph_nca_train
 #SBATCH --partition=GPU
 #SBATCH --account=dssc
-#SBATCH --gres=gpu:1            
-#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
+#SBATCH --output=logs/train_graph_%j.out
+#SBATCH --error=logs/train_graph_%j.err
 
-# --- (1) Setup paths ---
-# Your project root on the cluster:
-WORKDIR="$HOME/Graph_Neural_Cellular_Automata"    # <-- change if needed
-cd "$WORKDIR" || exit 1
+# --- Cluster info (useful for debugging) ---
+echo "Running on host: $(hostname)"
+echo "Job started at: $(date)"
+echo "Current working directory: $(pwd)"
+echo "SLURM_JOB_ID: ${SLURM_JOB_ID}"
 
+# --- Project root on the cluster ---
+WORKDIR="/orfeo/scratch/dssc/fspreafichi/Graph_Neural_Cellular_Automata"
+cd "$WORKDIR" || { echo "Failed to cd to $WORKDIR"; exit 1; }
+
+# --- Modules / environment ---
+module load cuda/11.8
+
+# Activate your Python 3.10 venv
+source "$WORKDIR/graph_nca_py310_env/bin/activate"
+
+# --- Housekeeping ---
 mkdir -p logs
+mkdir -p outputs
 
-# --- (2) Environment ---
-# If you use modules, uncomment and adapt:
-# module purge
-# module load cuda/12.1
-# module load anaconda/2024.02
-
-# Activate your venv/conda env
-source ~/.bashrc
-# conda activate agnn_env           # if conda
-source agnn_env/bin/activate        # if venv; adjust to your env
-
-# Safety / performance knobs
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+# Perf env
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=src
 
-# Optional: pin to one GPU if the node has many
-# export CUDA_VISIBLE_DEVICES=0
+# (optional) show GPU visibility
+nvidia-smi -L || true
 
-# --- (3) Run training ---
-echo "Running on host: $(hostname)"
-echo "Job started at: $(date)"
+# --- Train: auto-resume from outputs/graphaug_nca/.../checkpoints ---
 python --version
-
-# Train graph-augmented NCA (auto-resume from outputs/graphaug_nca/.../checkpoints)
-python src/training/train_graph_ncagraph.py
+PYTHONPATH=src python src/training/train_graph_augmented_nca.py
 
 echo "Job finished at: $(date)"
