@@ -5,6 +5,8 @@ import json
 import time
 import random
 from datetime import datetime
+import sys
+import signal  # <-- NEW
 
 import numpy as np
 import torch
@@ -106,8 +108,6 @@ def main():
     model.train()
 
     # Temporal sparsity for mid-range messages
-    #   - message_rate: Bernoulli per step (probability to use messages)
-    #   - message_every: if >1, only enable messages every k steps (wins over rate)
     msg_rate  = float(gcfg.get("message_rate", 1.0))
     msg_every = int(gcfg.get("message_every", 1))  # 1 = every step
 
@@ -154,7 +154,7 @@ def main():
     visualize_every = int(config["logging"]["visualize_interval"])
     ckpt_interval   = int(config["logging"].get("checkpoint_interval_epochs", 25))
 
-    # Resets (after step, on detached copy)
+    # Resets
     reset_worst_prob   = float(config["training"].get("reset_worst_prob", 0.10))
     random_reseed_prob = float(config["training"].get("random_reseed_prob", 0.05))
 
@@ -203,175 +203,222 @@ def main():
 
     epoch_losses, pixel_scores, ssim_scores, psnr_scores = [], [], [], []
 
-    for epoch in trange(start_epoch, total_epochs + 1, desc="Epochs"):
-        avg_loss = 0.0
-        epoch_pixel, epoch_ssim, epoch_psnr = [], [], []
+    # ---------- NEW: graceful termination handler (save last checkpoint) ----------
+    terminate = {"flag": False}
 
-        for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
-            idx, batch = pool.sample(batch_size)
-            state = batch.to(device)
+    def _save_ckpt(tag: str, epoch_val: int, global_step_val: int):
+        ckpt_path = os.path.join(ckpt_dir, f"nca_{tag}.pt")
+        torch.save({
+            "epoch": epoch_val,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+            "config": config,
+            "param_count": n_params,
+            "global_step": global_step_val,
+        }, ckpt_path)
+        print(f"[ckpt] saved {ckpt_path}")
 
-            # Pick rollout regime
-            if random.random() < long_prob:
-                steps_lo, steps_hi = long_min, long_max
-            else:
-                steps_lo, steps_hi = short_min, short_max
+    def _handle_term(signum, frame):
+        # Just set a flag; saving will happen safely in the training loop
+        print(f"[signal] Received {signum}. Will save a LAST checkpoint and exit cleanly...")
+        terminate["flag"] = True
 
-            nca_steps = torch.randint(steps_lo, steps_hi + 1, (batch_size,), device=device)
-            max_steps = int(nca_steps.max().item())
+    signal.signal(signal.SIGTERM, _handle_term)
+    signal.signal(signal.SIGINT,  _handle_term)
+    # ------------------------------------------------------------------------------
 
-            # Rollout with random fire-rate & temporally sparse messages
-            # (We toggle message usage by temporarily setting message_gain=0.)
-            base_gain = float(getattr(model, "message_gain", 0.5))
+    try:
+        for epoch in trange(start_epoch, total_epochs + 1, desc="Epochs"):
+            avg_loss = 0.0
+            epoch_pixel, epoch_ssim, epoch_psnr = [], [], []
 
-            for t in range(max_steps):
-                mask = (nca_steps > t)
-                if not mask.any():
-                    continue
+            for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
+                idx, batch = pool.sample(batch_size)
+                state = batch.to(device)
 
-                # fire-rate for this internal step
-                fr = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
+                # Pick rollout regime
+                if random.random() < long_prob:
+                    steps_lo, steps_hi = long_min, long_max
+                else:
+                    steps_lo, steps_hi = short_min, short_max
 
-                # decide whether to use graph this step
-                use_graph = True
-                if msg_every > 1:
-                    use_graph = (t % msg_every == 0)
-                elif msg_rate < 1.0:
-                    use_graph = (random.random() < msg_rate)
+                nca_steps = torch.randint(steps_lo, steps_hi + 1, (batch_size,), device=device)
+                max_steps = int(nca_steps.max().item())
 
-                if hasattr(model, "message_gain"):
-                    # toggle by gain (no autograd issues; it's just a float attr)
-                    if not use_graph:
-                        model.message_gain = 0.0
-                    else:
-                        model.message_gain = base_gain
+                # Rollout with random fire-rate & temporally sparse messages
+                base_gain = float(getattr(model, "message_gain", 0.5))
 
-                state[mask] = model(state[mask], fire_rate=fr)
+                for t in range(max_steps):
+                    mask = (nca_steps > t)
+                    if not mask.any():
+                        continue
 
-            # Restore original gain (important if we early-continued)
-            if hasattr(model, "message_gain"):
-                model.message_gain = base_gain
+                    # fire-rate for this internal step
+                    fr = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
 
-            # Target batch
-            target_expand = target.unsqueeze(0).expand_as(state[:, :4])
+                    # decide whether to use graph this step
+                    use_graph = True
+                    if msg_every > 1:
+                        use_graph = (t % msg_every == 0)
+                    elif msg_rate < 1.0:
+                        use_graph = (random.random() < msg_rate)
 
-            # Primary loss
-            per_sample = masked_loss(state[:, :4], target_expand,
-                                     alpha_thr=loss_alpha_thr, lam_area=loss_lam_area)
-            loss = per_sample.mean()
-
-            # Stability phase
-            if stab_enabled:
-                with torch.no_grad():
-                    close_mask = (per_sample < stab_thresh)
-                if close_mask.any():
-                    state_stab = state.clone()
-                    base_gain = float(getattr(model, "message_gain", 0.5))
-                    for k in range(stab_K):
-                        frs = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
-                        # apply same temporal sparsity policy during stability
-                        use_graph = True
-                        if msg_every > 1:
-                            use_graph = (k % msg_every == 0)
-                        elif msg_rate < 1.0:
-                            use_graph = (random.random() < msg_rate)
-                        if hasattr(model, "message_gain"):
-                            model.message_gain = base_gain if use_graph else 0.0
-                        state_stab[close_mask] = model(state_stab[close_mask], fire_rate=frs)
                     if hasattr(model, "message_gain"):
-                        model.message_gain = base_gain
-                    stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
-                    loss = loss + stab_weight * stab
+                        model.message_gain = base_gain if use_graph else 0.0
 
-            # Decide resets (apply after step on detached state)
-            n_reset = int(reset_worst_prob * batch_size)
-            worst_indices = torch.topk(per_sample, n_reset).indices if n_reset > 0 else None
-            do_random_reseed = (random.random() < random_reseed_prob)
-            rand_idx = torch.randint(0, batch_size, (1,), device=device).item() if do_random_reseed else None
+                    state[mask] = model(state[mask], fire_rate=fr)
 
-            # Optimize
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-            optimizer.step()
+                # Restore original gain
+                if hasattr(model, "message_gain"):
+                    model.message_gain = base_gain
 
-            # Pool replace on detached copy
-            state_for_pool = state.detach()
-            if (worst_indices is not None) or do_random_reseed:
-                state_for_pool = state_for_pool.clone()
-                if worst_indices is not None:
-                    state_for_pool[worst_indices] = seed_fn(len(worst_indices)).detach()
-                if do_random_reseed:
-                    state_for_pool[rand_idx:rand_idx+1] = seed_fn(1).detach()
-            pool.replace(idx, state_for_pool)
+                # Target batch
+                target_expand = target.unsqueeze(0).expand_as(state[:, :4])
 
-            # Metrics (on current state)
-            pred = state[:, :4]
-            pred_img = pred[0].detach().cpu().numpy()
-            target_img = target.cpu().numpy()
-            diff = np.abs(pred_img[:4] - target_img[:4])
-            pixel_perfect = (diff < 0.05).all(axis=0).mean()
-            epoch_pixel.append(float(pixel_perfect))
+                # Primary loss
+                per_sample = masked_loss(state[:, :4], target_expand,
+                                         alpha_thr=loss_alpha_thr, lam_area=loss_lam_area)
+                loss = per_sample.mean()
 
-            pred_np = pred[0, :3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
-            target_np = target[:3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
-            epoch_ssim.append(ssim(pred_np, target_np, data_range=1.0, channel_axis=-1))
-            epoch_psnr.append(psnr(pred_np, target_np, data_range=1.0))
+                # Stability phase
+                if stab_enabled:
+                    with torch.no_grad():
+                        close_mask = (per_sample < stab_thresh)
+                    if close_mask.any():
+                        state_stab = state.clone()
+                        base_gain = float(getattr(model, "message_gain", 0.5))
+                        for k in range(stab_K):
+                            frs = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
+                            use_graph = True
+                            if msg_every > 1:
+                                use_graph = (k % msg_every == 0)
+                            elif msg_rate < 1.0:
+                                use_graph = (random.random() < msg_rate)
+                            if hasattr(model, "message_gain"):
+                                model.message_gain = base_gain if use_graph else 0.0
+                            state_stab[close_mask] = model(state_stab[close_mask], fire_rate=frs)
+                        if hasattr(model, "message_gain"):
+                            model.message_gain = base_gain
+                        stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
+                        loss = loss + stab_weight * stab
 
-            avg_loss += loss.item()
+                # Decide resets (apply after step on detached copy)
+                n_reset = int(reset_worst_prob * batch_size)
+                worst_indices = torch.topk(per_sample, n_reset).indices if n_reset > 0 else None
+                do_random_reseed = (random.random() < random_reseed_prob)
+                rand_idx = torch.randint(0, batch_size, (1,), device=device).item() if do_random_reseed else None
 
-            # Logging
-            global_step = (epoch - 1) * steps_per_epoch + step
-            writer.add_scalar('Loss/train', loss.item(), global_step)
+                # Optimize
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                optimizer.step()
 
-            if (step + 1) % visualize_every == 0:
-                img = pred[0, :3].detach().cpu().clamp(0, 1)
-                writer.add_image('Predicted/sample', img, global_step)
-                save_path0 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
-                save_grid_as_image(state[0], save_path0)
-                save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
+                # Pool replace on detached copy
+                state_for_pool = state.detach()
+                if (worst_indices is not None) or do_random_reseed:
+                    state_for_pool = state_for_pool.clone()
+                    if worst_indices is not None:
+                        state_for_pool[worst_indices] = seed_fn(len(worst_indices)).detach()
+                    if do_random_reseed:
+                        state_for_pool[rand_idx:rand_idx+1] = seed_fn(1).detach()
+                pool.replace(idx, state_for_pool)
 
-            if (step + 1) % log_interval == 0:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] "
-                      f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
-                      f"Loss: {loss.item():.5f}")
+                # Metrics (on current state)
+                pred = state[:, :4]
+                pred_img = pred[0].detach().cpu().numpy()
+                target_img = target.cpu().numpy()
+                diff = np.abs(pred_img[:4] - target_img[:4])
+                pixel_perfect = (diff < 0.05).all(axis=0).mean()
+                epoch_pixel.append(float(pixel_perfect))
 
-        # End of epoch
-        avg_loss /= steps_per_epoch
-        epoch_losses.append(avg_loss)
-        pixel_scores.append(float(np.mean(epoch_pixel)))
-        ssim_scores.append(float(np.mean(epoch_ssim)))
-        psnr_scores.append(float(np.mean(epoch_psnr)))
+                pred_np = pred[0, :3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
+                target_np = target[:3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
+                epoch_ssim.append(ssim(pred_np, target_np, data_range=1.0, channel_axis=-1))
+                epoch_psnr.append(psnr(pred_np, target_np, data_range=1.0))
 
-        # Log row
-        with open(os.path.join(logs_dir, "training_log.jsonl"), "a") as f:
-            f.write(json.dumps({
-                "epoch": epoch,
-                "avg_loss": float(avg_loss),
-                "pixel_perfection": float(np.mean(epoch_pixel)),
-                "ssim": float(np.mean(epoch_ssim)),
-                "psnr": float(np.mean(epoch_psnr)),
-                "timestamp": datetime.now().isoformat()
-            }) + "\n")
+                avg_loss += loss.item()
 
-        writer.add_scalar('Loss/epoch_avg', avg_loss, epoch)
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
-              f"Average loss: {avg_loss:.6f}")
+                # Logging
+                global_step = (epoch - 1) * steps_per_epoch + step
+                writer.add_scalar('Loss/train', loss.item(), global_step)
 
-        if scheduler is not None:
-            scheduler.step()
+                if (step + 1) % visualize_every == 0:
+                    img = pred[0, :3].detach().cpu().clamp(0, 1)
+                    writer.add_image('Predicted/sample', img, global_step)
+                    save_path0 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
+                    save_grid_as_image(state[0], save_path0)
+                    save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
 
-        # Checkpoint
-        if epoch % ckpt_interval == 0 or epoch == total_epochs:
-            ckpt_path = os.path.join(ckpt_dir, f"nca_epoch{epoch}.pt")
-            torch.save({
-                "epoch": epoch,
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
-                "config": config,
-            }, ckpt_path)
-            print(f"Model checkpoint saved to {ckpt_path}")
+                if (step + 1) % log_interval == 0:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] "
+                          f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
+                          f"Loss: {loss.item():.5f}")
+
+                # --------- NEW: if SLURM told us to stop, save & exit now ----------
+                if terminate["flag"]:
+                    _save_ckpt(f"ep{epoch}_step{step+1}_last", epoch, global_step)
+                    writer.flush(); writer.close()
+                    print("[signal] Last checkpoint saved. Exiting.")
+                    sys.exit(0)
+                # ------------------------------------------------------------------
+
+            # End of epoch
+            avg_loss /= steps_per_epoch
+            epoch_losses.append(avg_loss)
+            pixel_scores.append(float(np.mean(epoch_pixel)))
+            ssim_scores.append(float(np.mean(epoch_ssim)))
+            psnr_scores.append(float(np.mean(epoch_psnr)))
+
+            # Log row
+            with open(os.path.join(logs_dir, "training_log.jsonl"), "a") as f:
+                f.write(json.dumps({
+                    "epoch": epoch,
+                    "avg_loss": float(avg_loss),
+                    "pixel_perfection": float(np.mean(epoch_pixel)),
+                    "ssim": float(np.mean(epoch_ssim)),
+                    "psnr": float(np.mean(epoch_psnr)),
+                    "timestamp": datetime.now().isoformat()
+                }) + "\n")
+
+            writer.add_scalar('Loss/epoch_avg', avg_loss, epoch)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Epoch [{epoch}] completed. "
+                  f"Average loss: {avg_loss:.6f}")
+
+            if scheduler is not None:
+                scheduler.step()
+
+            # Checkpoint
+            if epoch % ckpt_interval == 0 or epoch == total_epochs:
+                ckpt_path = os.path.join(ckpt_dir, f"nca_epoch{epoch}.pt")
+                torch.save({
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+                    "config": config,
+                }, ckpt_path)
+                print(f"Model checkpoint saved to {ckpt_path}")
+
+            # Also honor termination right after epoch boundary
+            if terminate["flag"]:
+                global_step = epoch * steps_per_epoch  # end-of-epoch step index
+                _save_ckpt(f"epoch{epoch}_last", epoch, global_step)
+                writer.flush(); writer.close()
+                print("[signal] Last checkpoint saved at epoch boundary. Exiting.")
+                sys.exit(0)
+
+    except Exception as e:
+        # Optional: write a last-ditch checkpoint on unexpected crash
+        try:
+            epoch_safe = locals().get("epoch", -1)
+            step_safe  = locals().get("step", -1)
+            global_step = (max(epoch_safe, 1) - 1) * steps_per_epoch + max(step_safe, 0)
+            _save_ckpt(f"crash_ep{epoch_safe}_step{step_safe}", max(epoch_safe, 1), global_step)
+            print(f"[crash] Saved emergency checkpoint due to: {e}")
+        finally:
+            raise
 
     # Summary JSON
     writer.flush(); writer.close()
