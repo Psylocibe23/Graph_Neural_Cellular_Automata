@@ -1,260 +1,316 @@
-# src/testing/test_graphaug_growth.py
-import os
-import torch
-import matplotlib.pyplot as plt
+import os, random, math
 import numpy as np
+import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
-from utils.nca_init import make_seed
 from utils.config import load_config
 from utils.image import load_single_target_image
+from utils.nca_init import make_seed
 
-# Graph-augmented NCA class
-from modules.ncagraph import NeuralCAGraph
+# Graph-augmented model
+from modules.nca_graph import NeuralCAGraph
 
 
-# -----------------------------------------------------------------------------
-# Utils
-# -----------------------------------------------------------------------------
-def save_img(img, path, upscale=4):
+# ------------------------------------------------------------
+# Utility: mask RGB by alpha and (optionally) upscale
+# ------------------------------------------------------------
+def masked_rgb(x4, alpha_thr=0.1, upscale=1):
     """
-    Save RGBA image, upscaled, masking out dead cells (alpha < 0.1).
-    img can be [C,H,W] or [1,C,H,W] or a tensor; we clamp and save with plt.
+    x4: [1,4,H,W] or [4,H,W] (tensor)
+    returns numpy [H,W,3] in [0,1]
     """
-    if hasattr(img, "detach"):
-        img = img.detach().cpu()
-    if img.ndim == 4:
-        img = img[0]
-    img_np = img[:4].permute(1, 2, 0).numpy().copy()  # [H,W,4]
-    alpha = img_np[..., 3:4]
-    mask = (alpha > 0.1).astype(np.float32)
-    img_np[..., :3] *= mask
-    img_np[..., 3:] = mask
+    if x4.ndim == 4:
+        x4 = x4[0]
+    rgb = x4[:3].detach().cpu()
+    a   = x4[3:4].detach().cpu()
+    m = (a > alpha_thr).float()
+    rgb = rgb * m
+    img = rgb.permute(1, 2, 0).numpy().clip(0, 1)
 
     if upscale > 1:
-        img_t = torch.tensor(img_np).permute(2, 0, 1).unsqueeze(0)  # [1,4,H,W]
-        img_t = F.interpolate(img_t, scale_factor=upscale, mode='bilinear', align_corners=False)[0]
-        img_np = img_t.permute(1, 2, 0).numpy()
-        img_np = np.clip(img_np, 0, 1)
-
-    assert img_np.ndim == 3 and img_np.shape[2] in (3, 4), f"Got shape {img_np.shape}"
-    plt.imsave(path, img_np)
+        t = torch.from_numpy(img).permute(2, 0, 1)[None]  # [1,3,H,W]
+        t = F.interpolate(t, scale_factor=upscale, mode="bilinear", align_corners=False)[0]
+        img = t.permute(1, 2, 0).numpy().clip(0, 1)
+    return img
 
 
-def save_attn(attn_hw, path, upscale=4, cmap='viridis'):
+# ------------------------------------------------------------
+# Zero-padded shift (to match the upgraded graph module)
+# ------------------------------------------------------------
+def shift2d(x, dy, dx, zero_pad=True):
+    if not zero_pad:
+        return torch.roll(x, shifts=(dy, dx), dims=(2, 3))
+    B, C, H, W = x.shape
+    top, bot  = max(dy, 0), max(-dy, 0)
+    left, right = max(dx, 0), max(-dx, 0)
+    xpad = F.pad(x, (left, right, top, bot), value=0.0)
+    return xpad[:, :, bot:bot + H, left:left + W]
+
+
+# ------------------------------------------------------------
+# Reconstruct the *exact* graph aggregation used this step
+# (same offsets thanks to Python RNG state capture)
+# Returns:
+#   attn_map [H,W], sender_union [H,W], receiver_mask [H,W],
+#   group_maps dict {"rgb":[..], "alpha":[..], "hidden":[..]},
+#   per_offset (list of (dy,dx,map[H,W]))
+# ------------------------------------------------------------
+@torch.no_grad()
+def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     """
-    Save an attention heatmap from a [H,W] (or [1,H,W]) tensor/ndarray in [0,1].
+    x: [1,C,H,W] tensor BEFORE the update step
+    graph_mod: modules.graph_augmentation.GraphAugmentation
     """
-    if hasattr(attn_hw, "detach"):
-        attn_hw = attn_hw.detach().cpu()
-    if isinstance(attn_hw, torch.Tensor):
-        if attn_hw.ndim == 3 and attn_hw.shape[0] == 1:
-            attn_hw = attn_hw[0]
-        attn_np = attn_hw.numpy()
+    B, C, H, W = x.shape
+    assert B == 1, "This debug visual expects batch=1."
+
+    # Pull config from the module
+    d_model = graph_mod.d_model
+    kmax    = graph_mod.num_neighbors
+    offsets = graph_mod.offsets
+    zero_pad = bool(getattr(graph_mod, "zero_padded_shift", True))
+    alive_to_alive = bool(getattr(graph_mod, "alive_to_alive", True))
+    temperature = graph_mod.scaling.abs().item() + 1e-6
+
+    # Projections
+    Q = graph_mod.query_proj(x)
+    K = graph_mod.key_proj(x)
+    M = graph_mod.msg_proj(x)
+
+    Qp = Q.mean(dim=(2, 3))  # [1,d]
+    if alive_to_alive:
+        A_send = (F.max_pool2d(x[:, 3:4], 3, 1, 1) > alpha_thr).float()  # [1,1,H,W]
+
+    # Receiver mask (same dilation as in the model)
+    A_recv = (F.max_pool2d(x[:, 3:4], 3, 1, 1) > alpha_thr).float()  # [1,1,H,W]
+
+    # Sample the same neighbor set (we restore RNG state outside)
+    k = min(kmax, len(offsets))
+    chosen = random.sample(offsets, k) if k > 0 else []
+
+    messages = []
+    logits   = []
+    sender_masks = []
+
+    for (dy, dx) in chosen:
+        K_shift = shift2d(K, dy, dx, zero_pad)  # [1,d,H,W]
+        M_shift = shift2d(M, dy, dx, zero_pad)  # [1,C,H,W]
+        if alive_to_alive:
+            src = shift2d(A_send, dy, dx, zero_pad)  # [1,1,H,W]
+            M_shift = M_shift * src
+            sender_masks.append(src)
+        Kp = K_shift.mean(dim=(2, 3))            # [1,d]
+        logit = (Qp * Kp).sum(dim=1)             # [1]
+        logits.append(logit)
+        messages.append(M_shift)
+
+    if len(chosen) == 0:
+        hw_zeros = torch.zeros(H, W, device=x.device)
+        return hw_zeros, hw_zeros, A_recv[0, 0].cpu(), {"rgb": hw_zeros, "alpha": hw_zeros, "hidden": hw_zeros}, []
+
+    L = torch.stack(logits, dim=0).squeeze(-1)       # [N]
+    L = L - L.max()                                  # stabilize
+    Wt = F.softmax(L / temperature, dim=0)           # [N]
+    Wt_bc = Wt.view(len(chosen), 1, 1, 1, 1)         # [N,1,1,1,1]
+    M_stack = torch.stack(messages, dim=0)           # [N,1,C,H,W]
+    weighted = M_stack * Wt_bc                       # [N,1,C,H,W]
+
+    # Attention map = mean over channels, sum over offsets
+    attn_map = weighted.abs().mean(dim=2).sum(dim=0)[0, :, :]  # [H,W]
+
+    # Sender union (alive_to_alive only)
+    if alive_to_alive and sender_masks:
+        src_stack = torch.stack(sender_masks, dim=0)  # [N,1,1,H,W]
+        sender_union = (src_stack.max(dim=0).values)[0, 0]      # [H,W]
     else:
-        attn_np = np.asarray(attn_hw)
+        sender_union = torch.zeros_like(attn_map)
 
-    # Normalize robustly to [0,1]
-    a_min, a_max = float(attn_np.min()), float(attn_np.max())
-    if a_max > a_min:
-        attn_np = (attn_np - a_min) / (a_max - a_min)
-    else:
-        attn_np = np.zeros_like(attn_np)
+    # Per-group maps (from weighted contributions BEFORE hidden-only policy)
+    def ch_mean(slice_):
+        return weighted[:, 0, slice_, :, :].abs().mean(dim=1).sum(dim=0)  # [H,W]
 
-    # Upscale via torch for consistency
-    if upscale > 1:
-        t = torch.tensor(attn_np).unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
-        t = F.interpolate(t, scale_factor=upscale, mode='bilinear', align_corners=False)[0, 0]
-        attn_np = t.numpy()
+    rgb_map   = ch_mean(slice(0, 3)) if C >= 3 else torch.zeros_like(attn_map)
+    alpha_map = ch_mean(slice(3, 4)) if C >= 4 else torch.zeros_like(attn_map)
+    hidden_map= ch_mean(slice(4, C)) if C >  4 else torch.zeros_like(attn_map)
 
-    plt.imsave(path, attn_np, cmap=cmap, vmin=0.0, vmax=1.0)
+    # Per-offset contributions (for tiles)
+    per_offset = []
+    for i, (dy, dx) in enumerate(chosen):
+        m_i = weighted[i, 0].abs().mean(dim=0)  # [H,W]
+        per_offset.append(((dy, dx), m_i))
+
+    return attn_map.cpu(), sender_union.cpu(), A_recv[0, 0].cpu(), \
+           {"rgb": rgb_map.cpu(), "alpha": alpha_map.cpu(), "hidden": hidden_map.cpu()}, \
+           per_offset
 
 
-def save_side_by_side(rgb_img, attn_hw, path, upscale=4, cmap='viridis', title_left='RGB', title_right='Attention'):
-    """
-    Make a side-by-side figure: masked RGB on the left, attention heatmap on the right.
-    """
-    # Prepare RGB (masked)
-    if hasattr(rgb_img, "detach"):
-        rgb_img = rgb_img.detach().cpu()
-    if rgb_img.ndim == 4:
-        rgb_img = rgb_img[0]
-    rgb_np = rgb_img[:4].permute(1, 2, 0).numpy().copy()
-    alpha = rgb_np[..., 3:4]
-    mask  = (alpha > 0.1).astype(np.float32)
-    rgb_np[..., :3] *= mask
-    rgb_np = np.clip(rgb_np[..., :3], 0, 1)
+# ------------------------------------------------------------
+# Plotting: main panel (generated RGB, attention, masks, groups)
+# ------------------------------------------------------------
+def save_main_panel(step, out_dir, rgb_img, attn, sender, receiver, group_maps):
+    os.makedirs(out_dir, exist_ok=True)
+    fig = plt.figure(figsize=(16, 8))
 
-    # Prepare attention
-    if hasattr(attn_hw, "detach"):
-        attn_hw = attn_hw.detach().cpu()
-    if isinstance(attn_hw, torch.Tensor):
-        if attn_hw.ndim == 3 and attn_hw.shape[0] == 1:
-            attn_hw = attn_hw[0]
-        attn_np = attn_hw.numpy()
-    else:
-        attn_np = np.asarray(attn_hw)
+    ax1 = plt.subplot(2, 3, 1)
+    ax1.imshow(rgb_img)
+    ax1.set_title("RGB (masked)")
+    ax1.axis("off")
 
-    # Normalize [0,1]
-    a_min, a_max = float(attn_np.min()), float(attn_np.max())
-    if a_max > a_min:
-        attn_np = (attn_np - a_min) / (a_max - a_min)
-    else:
-        attn_np = np.zeros_like(attn_np)
+    ax2 = plt.subplot(2, 3, 2)
+    ax2.imshow(attn, cmap="viridis")
+    ax2.set_title("Graph attention")
+    ax2.axis("off")
 
-    # Upscale both for nicer viewing
-    if upscale > 1:
-        # RGB
-        t_rgb = torch.tensor(rgb_np).permute(2, 0, 1).unsqueeze(0)  # [1,3,H,W]
-        t_rgb = F.interpolate(t_rgb, scale_factor=upscale, mode='bilinear', align_corners=False)[0]
-        rgb_np = t_rgb.permute(1, 2, 0).numpy()
-        rgb_np = np.clip(rgb_np, 0, 1)
-        # ATTN
-        t_a = torch.tensor(attn_np).unsqueeze(0).unsqueeze(0)
-        t_a = F.interpolate(t_a, scale_factor=upscale, mode='bilinear', align_corners=False)[0, 0]
-        attn_np = t_a.numpy()
+    # Overlay: attention + sender/receiver
+    ax3 = plt.subplot(2, 3, 3)
+    ax3.imshow(attn, cmap="viridis")
+    # sender in magenta, receiver in cyan
+    sender_rgb = np.zeros((*sender.shape, 4), dtype=np.float32)
+    sender_rgb[..., 0] = 1.0  # R
+    sender_rgb[..., 3] = (sender.numpy() > 0).astype(np.float32) * 0.35
+    ax3.imshow(sender_rgb)
+    receiver_rgb = np.zeros((*receiver.shape, 4), dtype=np.float32)
+    receiver_rgb[..., 1] = 1.0  # G
+    receiver_rgb[..., 3] = (receiver.numpy() > 0).astype(np.float32) * 0.35
+    ax3.imshow(receiver_rgb)
+    ax3.set_title("Attention + sender (magenta) / receiver (green)")
+    ax3.axis("off")
 
-    # Plot side-by-side
-    fig, axs = plt.subplots(1, 2, figsize=(8, 4))
-    axs[0].imshow(rgb_np)
-    axs[0].set_title(title_left)
-    axs[1].imshow(attn_np, cmap=cmap, vmin=0.0, vmax=1.0)
-    axs[1].set_title(title_right)
-    for ax in axs:
-        ax.axis('off')
+    # Group maps
+    ax4 = plt.subplot(2, 3, 4)
+    ax4.imshow(group_maps["rgb"], cmap="magma")
+    ax4.set_title("Per-group: RGB")
+    ax4.axis("off")
+
+    ax5 = plt.subplot(2, 3, 5)
+    ax5.imshow(group_maps["alpha"], cmap="magma")
+    ax5.set_title("Per-group: alpha")
+    ax5.axis("off")
+
+    ax6 = plt.subplot(2, 3, 6)
+    ax6.imshow(group_maps["hidden"], cmap="magma")
+    ax6.set_title("Per-group: hidden")
+    ax6.axis("off")
+
     plt.tight_layout()
-    plt.savefig(path, dpi=160)
+    path = os.path.join(out_dir, f"combo_{step:03d}.png")
+    plt.savefig(path, dpi=140)
     plt.close(fig)
+    return path
 
 
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
+# ------------------------------------------------------------
+# Plotting: per-offset tiles (directionality / border effects)
+# ------------------------------------------------------------
+def save_offset_tiles(step, out_dir, per_offset):
+    if not per_offset:
+        return None
+    # choose tile grid size
+    n = len(per_offset)
+    cols = int(math.ceil(math.sqrt(n)))
+    rows = int(math.ceil(n / cols))
+    fig = plt.figure(figsize=(3 * cols, 3 * rows))
+    for i, ((dy, dx), m) in enumerate(per_offset):
+        ax = plt.subplot(rows, cols, i + 1)
+        ax.imshow(m, cmap="viridis")
+        ax.set_title(f"dy={dy}, dx={dx}")
+        ax.axis("off")
+    plt.tight_layout()
+    path = os.path.join(out_dir, f"offsets_{step:03d}.png")
+    plt.savefig(path, dpi=140)
+    plt.close(fig)
+    return path
+
+
+# ------------------------------------------------------------
+# Main: roll the model and dump diagnostics every step
+# ------------------------------------------------------------
 def main():
-    # --- SETTINGS ---
-    config = load_config('configs/config.json')
+    # --- settings ---
+    config = load_config("configs/config.json")
     device      = config["misc"]["device"]
     n_channels  = int(config["model"]["n_channels"])
     img_size    = int(config["data"]["img_size"])
-    steps       = 400
-    upscale     = 4
+    alpha_thr   = float(config["model"].get("alpha_thr", 0.1))
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
-    # Pick your checkpoint (graph-aug run tree)
-    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch20.pt"
-    save_dir  = f"outputs/graphaug_nca/test_growth/{target_name}"
-    os.makedirs(save_dir, exist_ok=True)
+    # Pick your checkpoint (graphaug run)
+    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch025.pt"
+    out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
+    os.makedirs(out_dir, exist_ok=True)
 
-    # Optional: load target for your own inspection
-    _ = load_single_target_image(config).to(device)
+    STEPS      = 120       # how many CA steps to roll
+    UPSCALE    = 4         # upscale for the RGB view
+    FR_RANDOM  = False     # use random fire rate like training
+    FR_FIXED   = 0.5
 
-    # --- BUILD MODEL (mirror training args) ---
-    gcfg = config.get("graph_augmentation", {})
+    # --- build model ---
     model = NeuralCAGraph(
         n_channels=n_channels,
         update_hidden=int(config["model"]["update_mlp"]["hidden_dim"]),
         img_size=img_size,
         update_gain=float(config["model"].get("update_gain", 0.1)),
-        alpha_thr=float(config["model"].get("alpha_thr", 0.1)),
+        alpha_thr=alpha_thr,
         use_groupnorm=bool(config["model"].get("use_groupnorm", True)),
-        # Graph knobs
-        message_gain=float(gcfg.get("message_gain", 0.5)),
-        hidden_only=bool(gcfg.get("hidden_only", True)),
-        graph_d_model=int(gcfg.get("d_model", 16)),
-        graph_attention_radius=int(gcfg.get("attention_radius", 4)),
-        graph_num_neighbors=int(gcfg.get("num_neighbors", 8)),
-        graph_gating_hidden=int(gcfg.get("gating_hidden", 32)),
-        device=device
+        # graph knobs from config if present
+        message_gain=float(config["graph_augmentation"].get("message_gain", 0.5)),
+        hidden_only=bool(config["graph_augmentation"].get("hidden_only", True)),
+        graph_d_model=int(config["graph_augmentation"].get("d_model", 16)),
+        graph_attention_radius=int(config["graph_augmentation"].get("attention_radius", 4)),
+        graph_num_neighbors=int(config["graph_augmentation"].get("num_neighbors", 8)),
+        graph_gating_hidden=int(config["graph_augmentation"].get("gating_hidden", 32)),
+        graph_alive_to_alive=bool(config["graph_augmentation"].get("alive_to_alive", True)),
+        graph_zero_padded_shift=bool(config["graph_augmentation"].get("zero_padded_shift", True)),
+        device=device,
     ).to(device)
 
-    # Load weights (strict=False for robustness)
+    # Load weights
     ckpt = torch.load(ckpt_path, map_location=device)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
-    if missing:
-        print(f"[test] missing model keys (initialized fresh): {missing}")
-    if unexpected:
-        print(f"[test] unexpected model keys (ignored): {unexpected}")
+    if missing:   print(f"[test] missing keys (initialized fresh): {missing}")
+    if unexpected: print(f"[test] unexpected keys (ignored): {unexpected}")
     model.eval()
 
-    # --- PREPARE SEED ---
-    seed = make_seed(n_channels, img_size, batch_size=1, device=device)
+    # Seed
+    state = make_seed(n_channels, img_size, batch_size=1, device=device)
 
-    # --- ROLLOUT ---
-    state = seed.clone()
-    all_imgs  = []
-    all_attns = []
+    # Rollout with diagnostics
+    for t in range(STEPS + 1):
+        # ---- pre-step visuals will reflect the *next* transition ----
+        pre_state = state.clone()
 
-    # Fire-rate policy (match train): fixed 0.5 or random in [0.5,1.0]
-    FR_FIXED  = 0.5
-    FR_RANDOM = False
+        # capture python RNG so graph offsets in debug match the forward call
+        saved_rng = random.getstate()
 
-    # For visualization, we typically want graph messages every step
-    # If your class exposes a message sparsity knob, keep it on; else just run.
-    with torch.no_grad():
-        for t in range(steps + 1):
-            # Save current frame (before update)
-            frame_path = os.path.join(save_dir, f"frame_{t:03d}.png")
-            save_img(state[:, :4], frame_path, upscale=upscale)
-            all_imgs.append(state[:, :4][0].cpu())
+        # step the model
+        if FR_RANDOM:
+            fr = float(torch.empty(1, device=device).uniform_(0.5, 1.0).item())
+        else:
+            fr = FR_FIXED
 
-            # Try to step while ALSO retrieving the attention map used at this step
-            fr = float(torch.empty(1, device=device).uniform_(0.5, 1.0).item()) if FR_RANDOM else FR_FIXED
+        with torch.no_grad():
+            state, attn = model(pre_state, fire_rate=fr, return_attention=True)
 
-            attn_map = None
-            # Preferred path: model(..., return_attention=True) returns (state_next, attn)
-            try:
-                state, attn_map = model(state, fire_rate=fr, return_attention=True)
-            except TypeError:
-                # Fallback #1: some classes expose an internal graph module
-                try:
-                    # Step once without attention to get next state
-                    state = model(state, fire_rate=fr)
-                    # Now ask the graph to compute attn on the pre-update state or on current state
-                    if hasattr(model, "graph"):
-                        # Many GraphAug impls accept return_attention_map=True
-                        _maybe, attn_map = model.graph(state, return_attention_map=True)
-                        # Some return (gated_msg, attn); some return just attn. Handle both:
-                        if isinstance(_maybe, torch.Tensor) and _maybe.ndim >= 3:
-                            # first is gated message, second is attn
-                            pass
-                        else:
-                            # _maybe was actually the attn; adjust
-                            attn_map = _maybe
-                except Exception:
-                    # Fallback #2: if attention is unavailable, keep None
-                    pass
+        # reconstruct graph internals from the same RNG offsets on pre_state
+        random.setstate(saved_rng)
+        attn_dbg, senders, receivers, group_maps, per_offset = \
+            debug_graph_from_state(pre_state, model.graph, alpha_thr=model.alpha_thr)
 
-            # Save attention (if available)
-            if attn_map is not None:
-                # Expect attn_map shape [B,H,W] or [H,W]
-                attn_hw = attn_map[0] if (isinstance(attn_map, torch.Tensor) and attn_map.ndim == 3) else attn_map
-                attn_path = os.path.join(save_dir, f"attn_{t:03d}.png")
-                save_attn(attn_hw, attn_path, upscale=upscale, cmap='viridis')
+        # Prefer the attention returned by the model (already normalized).
+        # If you want to cross-check, you can compare with attn_dbg.
+        rgb_now = masked_rgb(state[:, :4], alpha_thr=alpha_thr, upscale=UPSCALE)
 
-                # Side-by-side composite
-                combo_path = os.path.join(save_dir, f"combo_{t:03d}.png")
-                save_side_by_side(state[:, :4], attn_hw, combo_path, upscale=upscale,
-                                  title_left='RGB (masked)', title_right='Graph Attention')
+        # save panels
+        main_path   = save_main_panel(t, out_dir, rgb_now, attn[0].cpu().numpy(), senders.numpy(), receivers.numpy(), 
+                                      {k: v.numpy() for k, v in group_maps.items()})
+        tiles_path  = save_offset_tiles(t, out_dir, per_offset)
 
-                all_attns.append(attn_hw.detach().cpu() if isinstance(attn_hw, torch.Tensor) else torch.tensor(attn_hw))
-            else:
-                all_attns.append(None)
+        if t % 10 == 0:
+            print(f"[test] saved {os.path.basename(main_path)}"
+                  f"{' and ' + os.path.basename(tiles_path) if tiles_path else ''}")
 
-    print(f"All frames saved to {save_dir}")
-    print(f"Example files:\n - {os.path.join(save_dir, 'frame_000.png')}\n - {os.path.join(save_dir, 'attn_000.png')} (if attention available)\n - {os.path.join(save_dir, 'combo_000.png')} (side-by-side)")
-
-    # --- OPTIONAL: quick montage of selected frames (RGB only) ---
-    select_steps = [1, 2, 4, 8, 16, 32, 49]
-    n = len(select_steps)
-    plt.figure(figsize=(n * 2, 2.5))
-    for i, step in enumerate(select_steps):
-        plt.subplot(1, n, i + 1)
-        img = all_imgs[step][:3].permute(1, 2, 0).numpy().clip(0, 1)
-        plt.imshow(img)
-        plt.axis("off")
-        plt.title(f"Step {step}")
-    plt.tight_layout()
-    plt.show()
+    print(f"All diagnostics saved to {out_dir}")
 
 
 if __name__ == "__main__":
