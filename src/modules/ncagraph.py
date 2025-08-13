@@ -1,4 +1,3 @@
-# modules/nca_graph.py
 # -----------------------------------------------------------------------------
 # Graph-augmented Neural Cellular Automata (stable long-horizon)
 #
@@ -8,7 +7,7 @@
 #   • Alive gating: pre-update on dx; post-update on ALPHA ONLY
 #   • Mid-range GraphAugmentation is injected as a bounded residual into dx
 #     (optionally only into hidden channels), then normalized/bounded together
-#     with the local update so it can't destabilize dynamics.
+#     with the local update so it can’t destabilize dynamics.
 #
 # Usage:
 #   from modules.nca_graph import NeuralCAGraph
@@ -44,17 +43,19 @@ class NeuralCAGraph(nn.Module):
     Args:
         n_channels:      total channels (RGBA + hidden)
         update_hidden:   hidden width of the update MLP
-        img_size:        canvas size (for LayerNorm alternatives; unused directly)
+        img_size:        canvas size (for completeness; not used directly)
         update_gain:     step size after bounding tanh(dx)
         alpha_thr:       alive threshold for alpha (post 3×3 max-pool)
         use_groupnorm:   if True, apply GroupNorm(1, C) to dx
-        # Graph options:
+        # Graph options (forwarded):
         message_gain:        scale factor for bounded graph message
         hidden_only:         if True, graph message only affects channels 4:
         graph_d_model:       Q/K proj dim
         graph_attention_radius:  maximum |dx|,|dy| for mid-range offsets (excl. 3×3 local)
         graph_num_neighbors: number of neighbor offsets sampled each step
         graph_gating_hidden: hidden width for channel-wise gate MLP
+        graph_alive_to_alive: only alive cells (alpha-dilated) can send messages
+        graph_zero_padded_shift: use zero-padded shifts (no wrap) for offsets
         device:          device string
     """
 
@@ -73,6 +74,8 @@ class NeuralCAGraph(nn.Module):
         graph_attention_radius: int = 4,
         graph_num_neighbors: int = 8,
         graph_gating_hidden: int = 32,
+        graph_alive_to_alive: bool = True,
+        graph_zero_padded_shift: bool = True,
         device: str = "cpu",
     ):
         super().__init__()
@@ -97,13 +100,16 @@ class NeuralCAGraph(nn.Module):
         # --- Normalize UPDATE (dx), not the state ---
         self.norm = nn.GroupNorm(1, n_channels, eps=1e-3, affine=True) if use_groupnorm else nn.Identity()
 
-        # --- Graph augmentation module ---
+        # --- Graph augmentation module (with the two upgrades) ---
         self.graph = GraphAugmentation(
             n_channels=n_channels,
             d_model=graph_d_model,
             attention_radius=graph_attention_radius,
             num_neighbors=graph_num_neighbors,
             gating_hidden=graph_gating_hidden,
+            alive_to_alive=graph_alive_to_alive,
+            zero_padded_shift=graph_zero_padded_shift,
+            alpha_thr=self.alpha_thr,
         )
 
         # How we inject the graph message
@@ -148,10 +154,10 @@ class NeuralCAGraph(nn.Module):
           3) m = graph(x)         (optionally return attention map)
           4) dx = dx_local + policy(m)   (bounded/scaled, hidden-only if set)
           5) fire-rate mask on dx (stochastic updates)
-          6) pre-alive gate on dx
+          6) pre-update alive gate on dx
           7) dx = norm(dx); dx = tanh(dx) * update_gain
           8) x = x + dx
-          9) post-alive gate on ALPHA ONLY (out-of-place)
+          9) post-update gate on ALPHA ONLY (out-of-place)
         """
         # 1) Perception
         y = self.perception(x)  # [B, 3*C, H, W]
@@ -169,7 +175,7 @@ class NeuralCAGraph(nn.Module):
         # Merge message into dx via bounded residual (policy may zero-out RGB+alpha)
         dx = dx + self._apply_message_policy(m)
 
-        # 5) Optional stochastic firing mask (shared across channels)
+        # 5) Stochastic firing mask (shared across channels)
         if fire_rate < 1.0:
             fire_mask = (torch.rand(x.shape[0], 1, x.shape[2], x.shape[3], device=x.device) <= fire_rate).float()
             dx = dx * fire_mask

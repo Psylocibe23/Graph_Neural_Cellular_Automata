@@ -1,107 +1,157 @@
+import math
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-import random
 
 
 class GraphAugmentation(nn.Module):
     """
-    Augments local NCA with mid-range graph message passing, gated channelwise 
+    Mid-range, gated message passing used by NeuralCAGraph.
+
+    Computes per-pixel messages by aggregating features from a sparse set of
+    mid-range offsets using attention weights. Optional upgrades:
+      • alive_to_alive: only 'alive' (alpha-dilated) source cells send messages
+      • zero_padded_shift: use zero-padded shifts instead of torch.roll to avoid wrap
+
+    Returns either just the aggregated message, or (message, attention_map) when
+    return_attention_map=True (useful for visualization).
     """
-    def __init__(self, n_channels, d_model=16, attention_radius=4, num_neighbors=8, gating_hidden=32):
-        """
-        n_channels: Number of channels in NCA state
-        d_model: Dimension of projected queries/keys
-        attention_radius: Maximum distance for "mid-range" neighbors
-        num_neighbors: Number of neighbors to attend to (sampled each step)
-        gating_hidden: Hidden size for channel-wise gate MLP
-        """
+
+    def __init__(
+        self,
+        n_channels: int,
+        d_model: int = 16,
+        attention_radius: int = 4,
+        num_neighbors: int = 8,
+        gating_hidden: int = 32,
+        *,
+        alive_to_alive: bool = True,
+        zero_padded_shift: bool = True,
+        alpha_thr: float = 0.1,
+    ):
         super().__init__()
         self.n_channels = n_channels
         self.d_model = d_model
         self.attention_radius = attention_radius
         self.num_neighbors = num_neighbors
+        self.alive_to_alive = bool(alive_to_alive)
+        self.zero_padded_shift = bool(zero_padded_shift)
+        self.alpha_thr = float(alpha_thr)
 
-        # Q, K, M projections: 1x1 convs for each
+        # 1x1 projections
         self.query_proj = nn.Conv2d(n_channels, d_model, 1)
-        self.key_proj = nn.Conv2d(n_channels, d_model, 1)
-        self.msg_proj = nn.Conv2d(n_channels, n_channels, 1)  # messages keep all channels
+        self.key_proj   = nn.Conv2d(n_channels, d_model, 1)
+        self.msg_proj   = nn.Conv2d(n_channels, n_channels, 1)  # messages keep all channels
 
-        # Learnable scaling (alpha)
+        # Learnable temperature (denominator) for logits; init ~ sqrt(d_model)
         self.scaling = nn.Parameter(torch.tensor(math.sqrt(d_model), dtype=torch.float32))
 
-        # Channel-wise gate
+        # Channel-wise gate: decides per channel how much of agg_message to use
         self.gate_mlp = nn.Sequential(
-            nn.Conv2d(n_channels*2, gating_hidden, 1),
-            nn.ReLU(),
+            nn.Conv2d(n_channels * 2, gating_hidden, 1),
+            nn.ReLU(inplace=False),
             nn.Conv2d(gating_hidden, n_channels, 1),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
-        # Build all possible mid-range offsets (excluding zero/center and local 1-step neighbors)
+        # Precompute list of mid-range offsets (exclude self and 3x3 locals)
         self.offsets = self._build_offsets(attention_radius)
 
-    def _build_offsets(self, radius):
+    @staticmethod
+    def _build_offsets(radius: int):
         offsets = []
-        for dy in range(-radius, radius+1):
-            for dx in range(-radius, radius+1):
-                if (dx, dy) == (0, 0): continue  # skip self
-                if abs(dx) <= 1 and abs(dy) <= 1: continue  # skip local neighbors
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if (dy, dx) == (0, 0):
+                    continue
+                if abs(dy) <= 1 and abs(dx) <= 1:  # remove local neighborhood
+                    continue
                 offsets.append((dy, dx))
         return offsets
 
-    def forward(self, x, return_attention_map=False):
+    @staticmethod
+    def _shift2d_pad(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
+        """Zero-padded shift (no wrap)."""
+        B, C, H, W = x.shape
+        top, bot  = max(dy, 0), max(-dy, 0)
+        left, right = max(dx, 0), max(-dx, 0)
+        xpad = F.pad(x, (left, right, top, bot), value=0.0)
+        return xpad[:, :, bot:bot + H, left:left + W]
+
+    @staticmethod
+    def _shift2d_roll(x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
+        """Wrap-around shift (torus)."""
+        return torch.roll(x, shifts=(dy, dx), dims=(2, 3))
+
+    def _shift(self, x: torch.Tensor, dy: int, dx: int) -> torch.Tensor:
+        if self.zero_padded_shift:
+            return self._shift2d_pad(x, dy, dx)
+        return self._shift2d_roll(x, dy, dx)
+
+    def forward(self, x: torch.Tensor, return_attention_map: bool = False):
         # x: [B, C, H, W]
         B, C, H, W = x.shape
-        device = x.device
 
-        # Project Q, K, M
-        Q = self.query_proj(x)  # [B, d_model, H, W]
-        K = self.key_proj(x)  # [B, d_model, H, W]
-        M = self.msg_proj(x)  # [B, C, H, W]
+        # Projections
+        Q = self.query_proj(x)  # [B, d, H, W]
+        K = self.key_proj(x)    # [B, d, H, W]
+        M = self.msg_proj(x)    # [B, C, H, W]
 
-        # Spatial mean-pooling: [B, d_model, H, W] -> [B, d_model]
-        Q_pooled = Q.mean(dim=[2,3])  # [B, d_model]
-        K_pooled = K.mean(dim=[2,3])  # [B, d_model]
+        # Spatially pooled descriptors (global summaries)
+        Q_pooled = Q.mean(dim=(2, 3))  # [B, d]
+        # Precompute sender alive mask (dilated)
+        if self.alive_to_alive:
+            A_send = (F.max_pool2d(x[:, 3:4], 3, 1, 1) > self.alpha_thr).float()  # [B,1,H,W]
 
-        # For each cell, gather mid-range neighbors (randomly sample num_neighbors)
-        chosen_offsets = random.sample(self.offsets, min(self.num_neighbors, len(self.offsets)))
+        # Randomly choose neighbor offsets this step
+        k = min(self.num_neighbors, len(self.offsets))
+        chosen = random.sample(self.offsets, k) if k > 0 else []
+
         messages = []
-        affinities = []
+        logits   = []
 
-        for dy, dx in chosen_offsets:
-            shifted_K = torch.roll(K, shifts=(dy, dx), dims=(2,3))
-            shifted_M = torch.roll(M, shifts=(dy, dx), dims=(2,3))
-            shifted_K_pooled = shifted_K.mean(dim=[2,3])  # [B, d_model]
-            # Compute attention affinity: (q_i^T k_j) / alpha
-            attn = (Q_pooled * shifted_K_pooled).sum(dim=1) / (self.scaling + 1e-6)  # [B]
-            attn = attn.view(B, 1, 1, 1)  # broadcast
-            affinities.append(attn)
-            messages.append(shifted_M)
+        for (dy, dx) in chosen:
+            K_shift = self._shift(K, dy, dx)  # [B, d, H, W]
+            M_shift = self._shift(M, dy, dx)  # [B, C, H, W]
 
-        # Stack and softmax over neighbors
-        messages = torch.stack(messages, dim=0)  # [num_neighbors, B, C, H, W]
-        affinities = torch.stack(affinities, dim=0)  # [num_neighbors, B, 1, 1, 1]
-        attn_weights = F.softmax(affinities, dim=0)  # [num_neighbors, B, 1, 1, 1]
+            # Alive→alive: only alive senders contribute
+            if self.alive_to_alive:
+                src = self._shift(A_send, dy, dx)  # [B,1,H,W]
+                M_shift = M_shift * src
 
-        # Weighted sum of messages
-        weighted_messages = messages * attn_weights  # [num_neighbors, B, C, H, W]
-        agg_message = weighted_messages.sum(dim=0)  # [B, C, H, W]
+            # Logit uses pooled descriptors
+            Kp = K_shift.mean(dim=(2, 3))            # [B, d]
+            logit = (Q_pooled * Kp).sum(dim=1)       # [B]
+            logits.append(logit)
+            messages.append(M_shift)
 
-        # Channel-wise gate (learns for each channel how much to use the mid-range info)
-        concat = torch.cat([x, agg_message], dim=1)  # [B, 2C, H, W]
-        gate = self.gate_mlp(concat)  # [B, C, H, W], [0,1]
-        gated_message = agg_message * gate
+        if len(chosen) == 0:
+            # No neighbors — fall back to zeros
+            agg_message = torch.zeros_like(M)
+            if return_attention_map:
+                attn_map = torch.zeros(B, H, W, device=x.device, dtype=x.dtype)
+                return agg_message, attn_map
+            return agg_message
 
-        # ---- NEW: Produce a per-pixel attention heatmap ----
+        # Stack and softmax over offsets (numerically stable)
+        L = torch.stack(logits, dim=0)                      # [N, B]
+        L = L - L.max(dim=0, keepdim=True).values           # subtract max per batch item
+        denom = self.scaling.abs() + 1e-6                   # positive temperature
+        Wt = F.softmax(L / denom, dim=0)                    # [N, B]
+        Wt = Wt.view(len(chosen), B, 1, 1, 1)               # broadcast to [N,B,1,1,1]
+
+        M_stack = torch.stack(messages, dim=0)              # [N, B, C, H, W]
+        weighted = M_stack * Wt                              # [N, B, C, H, W]
+        agg_message = weighted.sum(dim=0)                   # [B, C, H, W]
+
         if return_attention_map:
-            # Take mean absolute value across channels and neighbors
-            # Shape: [num_neighbors, B, C, H, W]
-            attn_map = weighted_messages.abs().mean(dim=2)  # mean over channels, shape [num_neighbors, B, H, W]
-            attn_map = attn_map.sum(dim=0)  # sum over neighbors, shape [B, H, W]
-            # Optionally: normalize to [0, 1] for visualization
-            attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
-            return gated_message, attn_map
+            # Channel-averaged magnitude of weighted contributions, summed over offsets
+            attn_map = weighted.abs().mean(dim=2).sum(dim=0)  # [B, H, W]
+            # Normalize to [0,1] per-sample for visualization
+            attn_min = attn_map.amin(dim=(1, 2), keepdim=True)
+            attn_max = attn_map.amax(dim=(1, 2), keepdim=True)
+            attn_map = (attn_map - attn_min) / (attn_max - attn_min + 1e-8)
+            return agg_message, attn_map
 
-        return gated_message  # [B, C, H, W]
+        return agg_message

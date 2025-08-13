@@ -86,7 +86,8 @@ def main():
         if n_ch > 4:
             g[:, 4:, cy, cx] = 0.01 * torch.randn_like(g[:, 4:, cy, cx])
         return g
-
+    
+    
     # ---- Model (Graph-aug NCA) ----
     gcfg = config.get("graph_augmentation", {})
     model = NeuralCAGraph(
