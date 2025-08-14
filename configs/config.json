@@ -59,6 +59,9 @@
     "random_reseed_prob": 0.05, 
     "damage_patch_size": 10,
     "damage_prob": 0.30,
+    "damage_start_epoch": 100,
+    "loss_lam_bg_alpha": 1e-3,
+    "loss_lam_bg_rgb": 2e-4,
     "scheduler": {
       "type": "StepLR",
       "step_size": 50,

@@ -1,3 +1,4 @@
+# src/testing/test_graph_augmented_nca.py
 import os, random, math
 import numpy as np
 import torch
@@ -9,7 +10,18 @@ from utils.image import load_single_target_image
 from utils.nca_init import make_seed
 
 # Graph-augmented model
-from modules.nca_graph import NeuralCAGraph
+from modules.ncagraph import NeuralCAGraph
+
+
+# ------------------------------------------------------------
+# Small helper: coerce tensor/array-like -> numpy
+# ------------------------------------------------------------
+def to_np(x):
+    if isinstance(x, np.ndarray):
+        return x
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
 
 
 # ------------------------------------------------------------
@@ -66,7 +78,6 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     assert B == 1, "This debug visual expects batch=1."
 
     # Pull config from the module
-    d_model = graph_mod.d_model
     kmax    = graph_mod.num_neighbors
     offsets = graph_mod.offsets
     zero_pad = bool(getattr(graph_mod, "zero_padded_shift", True))
@@ -107,7 +118,9 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
 
     if len(chosen) == 0:
         hw_zeros = torch.zeros(H, W, device=x.device)
-        return hw_zeros, hw_zeros, A_recv[0, 0].cpu(), {"rgb": hw_zeros, "alpha": hw_zeros, "hidden": hw_zeros}, []
+        # Everything zero; keep shapes consistent
+        return hw_zeros.cpu(), hw_zeros.cpu(), A_recv[0, 0].cpu(), \
+               {"rgb": hw_zeros.cpu(), "alpha": hw_zeros.cpu(), "hidden": hw_zeros.cpu()}, []
 
     L = torch.stack(logits, dim=0).squeeze(-1)       # [N]
     L = L - L.max()                                  # stabilize
@@ -150,46 +163,56 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
 # ------------------------------------------------------------
 def save_main_panel(step, out_dir, rgb_img, attn, sender, receiver, group_maps):
     os.makedirs(out_dir, exist_ok=True)
+
+    # Coerce to numpy
+    attn_np    = to_np(attn)
+    sender_np  = to_np(sender)
+    receiver_np= to_np(receiver)
+    rgb_np     = to_np(rgb_img)
+    rgb_map_np   = to_np(group_maps["rgb"])
+    alpha_map_np = to_np(group_maps["alpha"])
+    hidden_map_np= to_np(group_maps["hidden"])
+
     fig = plt.figure(figsize=(16, 8))
 
     ax1 = plt.subplot(2, 3, 1)
-    ax1.imshow(rgb_img)
+    ax1.imshow(rgb_np)
     ax1.set_title("RGB (masked)")
     ax1.axis("off")
 
     ax2 = plt.subplot(2, 3, 2)
-    ax2.imshow(attn, cmap="viridis")
+    ax2.imshow(attn_np, cmap="viridis")
     ax2.set_title("Graph attention")
     ax2.axis("off")
 
     # Overlay: attention + sender/receiver
     ax3 = plt.subplot(2, 3, 3)
-    ax3.imshow(attn, cmap="viridis")
-    # sender in magenta, receiver in cyan
-    sender_rgb = np.zeros((*sender.shape, 4), dtype=np.float32)
-    sender_rgb[..., 0] = 1.0  # R
-    sender_rgb[..., 3] = (sender.numpy() > 0).astype(np.float32) * 0.35
-    ax3.imshow(sender_rgb)
-    receiver_rgb = np.zeros((*receiver.shape, 4), dtype=np.float32)
-    receiver_rgb[..., 1] = 1.0  # G
-    receiver_rgb[..., 3] = (receiver.numpy() > 0).astype(np.float32) * 0.35
-    ax3.imshow(receiver_rgb)
+    ax3.imshow(attn_np, cmap="viridis")
+    # sender in magenta, receiver in green
+    sender_rgba = np.zeros((*sender_np.shape, 4), dtype=np.float32)
+    sender_rgba[..., 0] = 1.0  # R
+    sender_rgba[..., 3] = (sender_np > 0).astype(np.float32) * 0.35
+    ax3.imshow(sender_rgba)
+    receiver_rgba = np.zeros((*receiver_np.shape, 4), dtype=np.float32)
+    receiver_rgba[..., 1] = 1.0  # G
+    receiver_rgba[..., 3] = (receiver_np > 0).astype(np.float32) * 0.35
+    ax3.imshow(receiver_rgba)
     ax3.set_title("Attention + sender (magenta) / receiver (green)")
     ax3.axis("off")
 
     # Group maps
     ax4 = plt.subplot(2, 3, 4)
-    ax4.imshow(group_maps["rgb"], cmap="magma")
+    ax4.imshow(rgb_map_np, cmap="magma")
     ax4.set_title("Per-group: RGB")
     ax4.axis("off")
 
     ax5 = plt.subplot(2, 3, 5)
-    ax5.imshow(group_maps["alpha"], cmap="magma")
+    ax5.imshow(alpha_map_np, cmap="magma")
     ax5.set_title("Per-group: alpha")
     ax5.axis("off")
 
     ax6 = plt.subplot(2, 3, 6)
-    ax6.imshow(group_maps["hidden"], cmap="magma")
+    ax6.imshow(hidden_map_np, cmap="magma")
     ax6.set_title("Per-group: hidden")
     ax6.axis("off")
 
@@ -213,7 +236,7 @@ def save_offset_tiles(step, out_dir, per_offset):
     fig = plt.figure(figsize=(3 * cols, 3 * rows))
     for i, ((dy, dx), m) in enumerate(per_offset):
         ax = plt.subplot(rows, cols, i + 1)
-        ax.imshow(m, cmap="viridis")
+        ax.imshow(to_np(m), cmap="viridis")
         ax.set_title(f"dy={dy}, dx={dx}")
         ax.axis("off")
     plt.tight_layout()
@@ -236,7 +259,7 @@ def main():
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
     # Pick your checkpoint (graphaug run)
-    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch025.pt"
+    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch55.pt"
     out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
     os.makedirs(out_dir, exist_ok=True)
 
@@ -298,13 +321,14 @@ def main():
             debug_graph_from_state(pre_state, model.graph, alpha_thr=model.alpha_thr)
 
         # Prefer the attention returned by the model (already normalized).
-        # If you want to cross-check, you can compare with attn_dbg.
         rgb_now = masked_rgb(state[:, :4], alpha_thr=alpha_thr, upscale=UPSCALE)
 
         # save panels
-        main_path   = save_main_panel(t, out_dir, rgb_now, attn[0].cpu().numpy(), senders.numpy(), receivers.numpy(), 
-                                      {k: v.numpy() for k, v in group_maps.items()})
-        tiles_path  = save_offset_tiles(t, out_dir, per_offset)
+        main_path  = save_main_panel(
+            t, out_dir, rgb_now, attn[0], senders, receivers,
+            {"rgb": group_maps["rgb"], "alpha": group_maps["alpha"], "hidden": group_maps["hidden"]}
+        )
+        tiles_path = save_offset_tiles(t, out_dir, per_offset)
 
         if t % 10 == 0:
             print(f"[test] saved {os.path.basename(main_path)}"

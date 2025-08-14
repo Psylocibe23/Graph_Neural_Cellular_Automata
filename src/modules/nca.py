@@ -35,11 +35,11 @@ class NeuralCA(nn.Module):
         # Fixed perception: depthwise conv with identity + Sobel (non-trainable)
         self.perception = FixedSobelPerception(n_channels)  # -> [B, 3*C, H, W]
 
-        # Update network: 1x1 convs (no in-place ReLU!)
+        # Update network: 1x1 convs 
         in_dim = n_channels * 3
         self.update_net = nn.Sequential(
             nn.Conv2d(in_dim, update_hidden, kernel_size=1, bias=True),
-            nn.ReLU(inplace=False),  # <- important: NOT in-place
+            nn.ReLU(inplace=False),  
             nn.Conv2d(update_hidden, n_channels, kernel_size=1, bias=False),
         )
         # Zero-init the last conv for gentle starts (pairs well with bounded updates)

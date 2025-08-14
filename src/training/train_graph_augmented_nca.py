@@ -1,12 +1,6 @@
-import os
-import re
-import glob
-import json
-import time
-import random
+# src/training/train_graph_ncagraph.py
+import os, re, glob, json, time, random, sys, signal
 from datetime import datetime
-import sys
-import signal  # <-- NEW
 
 import numpy as np
 import torch
@@ -24,25 +18,30 @@ from utils.nca_init import make_seed
 from utils.utility_functions import count_parameters
 from utils.visualize import save_comparison
 
-# Graph-augmented NCA (your class in src/modules/ncagraph.py)
 from modules.ncagraph import NeuralCAGraph
 
-# ---------------------------------------------------------------------------
-# Masked loss: supervise where TARGET is alive + tiny area penalty on alpha
-# ---------------------------------------------------------------------------
-def masked_loss(pred, target, alpha_thr: float = 0.2, lam_area: float = 5e-5):
+
+# ------------------------- Loss (with background penalties) ------------------
+def masked_loss(pred, target, alpha_thr=0.2,
+                lam_area=5e-5, lam_bg_alpha=1e-3, lam_bg_rgb=2e-4):
     """
-    pred, target: [B, 4, H, W]
-    Loss is MSE masked by TARGET alpha > alpha_thr, plus a tiny 'area' penalty
-    on predicted alpha to discourage sprawl.
-    Returns: per-sample vector [B]
+    pred, target: [B,4,H,W] in [0,1]
+    - MSE where TARGET alpha > alpha_thr (on all 4 channels)
+    - Background alpha penalty: pred alpha on TARGET-dead
+    - Tiny background RGB penalty: pred RGB on TARGET-dead
     """
-    target_mask = (target[:, 3:4] > alpha_thr).float()   # [B,1,H,W]
-    mse = ((pred - target) ** 2) * target_mask
-    denom = target_mask.sum(dim=(1, 2, 3)) + 1e-8
-    per_sample = mse.sum(dim=(1, 2, 3)) / denom
-    area_pen = lam_area * pred[:, 3:4].mean(dim=(1, 2, 3))
-    return per_sample + area_pen
+    tgt_alive = (target[:, 3:4] > alpha_thr).float()
+    tgt_dead  = 1.0 - tgt_alive
+
+    mse = ((pred - target) ** 2) * tgt_alive
+    denom = tgt_alive.sum(dim=(1, 2, 3)) + 1e-8
+    primary = mse.sum(dim=(1, 2, 3)) / denom
+
+    bg_alpha_pen = lam_bg_alpha * (pred[:, 3:4] * tgt_dead).mean(dim=(1, 2, 3))
+    bg_rgb_pen   = lam_bg_rgb   * (pred[:, :3]  * tgt_dead).abs().mean(dim=(1, 2, 3))
+    area_pen     = lam_area * pred[:, 3:4].mean(dim=(1, 2, 3))
+
+    return primary + bg_alpha_pen + bg_rgb_pen + area_pen
 
 
 def save_grid_as_image(grid, filename):
@@ -53,11 +52,35 @@ def save_grid_as_image(grid, filename):
     plt.imsave(filename, img)
 
 
+# ----------------------------- small helpers ---------------------------------
+def extract_epoch_num(name):
+    m = re.search(r'epoch(\d+)', name)
+    return int(m.group(1)) if m else -1
+
+
+def apply_square_damage_(state, patch, prob):
+    """
+    In-place damage on a subset of batch elements.
+    state: [B,C,H,W] (tensor)
+    patch: int, side length
+    prob: probability per-sample to apply one patch
+    """
+    B, C, H, W = state.shape
+    if patch <= 0 or prob <= 0:
+        return
+    for b in range(B):
+        if random.random() < prob:
+            py = random.randint(0, max(0, H - patch))
+            px = random.randint(0, max(0, W - patch))
+            state[b, :, py:py+patch, px:px+patch] = 0.0  # zero all channels
+
+
+# ================================== main =====================================
 def main():
     start_wall = time.time()
     config = load_config("configs/config.json")
 
-    # ---- IO dirs (separate tree for graph runs) ----
+    # ---- IO ----
     target_name = os.path.splitext(config["data"]["active_target"])[0]
     base_dir = os.path.join("outputs", "graphaug_nca", "train_inter_loss", target_name)
     results_dir = os.path.join(base_dir, "images")
@@ -69,7 +92,7 @@ def main():
         os.makedirs(d, exist_ok=True)
 
     device = config["misc"]["device"]
-    torch.manual_seed(config["misc"]["seed"])
+    torch.manual_seed(int(config["misc"]["seed"]))
 
     # ---- Data ----
     target   = load_single_target_image(config).to(device)  # [4,H,W]
@@ -78,7 +101,7 @@ def main():
 
     writer = SummaryWriter(log_dir=tb_dir)
 
-    # ---- Seed: alpha=1 at center; tiny noise on hidden channels only ----
+    # ---- Seed ----
     def seed_fn(batch_size=1):
         g = torch.zeros(batch_size, n_ch, img_size, img_size, device=device)
         cy = img_size // 2; cx = img_size // 2
@@ -86,9 +109,8 @@ def main():
         if n_ch > 4:
             g[:, 4:, cy, cx] = 0.01 * torch.randn_like(g[:, 4:, cy, cx])
         return g
-    
-    
-    # ---- Model (Graph-aug NCA) ----
+
+    # ---- Model ----
     gcfg = config.get("graph_augmentation", {})
     model = NeuralCAGraph(
         n_channels=n_ch,
@@ -97,7 +119,6 @@ def main():
         update_gain=float(config["model"].get("update_gain", 0.1)),
         alpha_thr=float(config["model"].get("alpha_thr", 0.1)),
         use_groupnorm=bool(config["model"].get("use_groupnorm", True)),
-        # Graph knobs
         message_gain=float(gcfg.get("message_gain", 0.5)),
         hidden_only=bool(gcfg.get("hidden_only", True)),
         graph_d_model=int(gcfg.get("d_model", 16)),
@@ -108,7 +129,7 @@ def main():
     ).to(device)
     model.train()
 
-    # Temporal sparsity for mid-range messages
+    # Temporal sparsity controls for graph messages
     msg_rate  = float(gcfg.get("message_rate", 1.0))
     msg_every = int(gcfg.get("message_every", 1))  # 1 = every step
 
@@ -151,29 +172,32 @@ def main():
     fr_min          = float(config["training"].get("fire_rate_min", 0.5))
     fr_max          = float(config["training"].get("fire_rate_max", 1.0))
 
+    # damage curriculum
+    damage_prob       = float(config["training"].get("damage_prob", 0.0))
+    damage_patch_size = int(config["training"].get("damage_patch_size", 0))
+    damage_start_ep   = int(config["training"].get("damage_start_epoch", 100))  # << start at 100
+
     log_interval    = int(config["logging"]["log_interval"])
     visualize_every = int(config["logging"]["visualize_interval"])
     ckpt_interval   = int(config["logging"].get("checkpoint_interval_epochs", 25))
 
-    # Resets
+    # resets
     reset_worst_prob   = float(config["training"].get("reset_worst_prob", 0.10))
     random_reseed_prob = float(config["training"].get("random_reseed_prob", 0.05))
 
-    # Stability phase
+    # stability phase
     stab_enabled   = bool(config["training"].get("stability_enabled", True))
     stab_K         = int(config["training"].get("stability_K", 24))
     stab_thresh    = float(config["training"].get("stability_threshold", 0.01))
     stab_weight    = float(config["training"].get("stability_weight", 0.5))
 
-    # Loss knobs
+    # loss knobs (expose bg penalties via config if present)
     loss_alpha_thr = float(config["training"].get("loss_alpha_thr", 0.2))
     loss_lam_area  = float(config["training"].get("loss_lam_area", 5e-5))
+    loss_lam_bg_alpha = float(config["training"].get("loss_lam_bg_alpha", 1e-3))
+    loss_lam_bg_rgb   = float(config["training"].get("loss_lam_bg_rgb",   2e-4))
 
-    # ---- Resume (strict=False for safety across versions) ----
-    def extract_epoch_num(name):
-        m = re.search(r'epoch(\d+)', name)
-        return int(m.group(1)) if m else -1
-
+    # ---- Resume ----
     ckpt_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
     if ckpt_files:
         ckpt_files.sort(key=extract_epoch_num)
@@ -204,7 +228,7 @@ def main():
 
     epoch_losses, pixel_scores, ssim_scores, psnr_scores = [], [], [], []
 
-    # ---------- NEW: graceful termination handler (save last checkpoint) ----------
+    # graceful termination
     terminate = {"flag": False}
 
     def _save_ckpt(tag: str, epoch_val: int, global_step_val: int):
@@ -221,24 +245,35 @@ def main():
         print(f"[ckpt] saved {ckpt_path}")
 
     def _handle_term(signum, frame):
-        # Just set a flag; saving will happen safely in the training loop
         print(f"[signal] Received {signum}. Will save a LAST checkpoint and exit cleanly...")
         terminate["flag"] = True
 
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT,  _handle_term)
-    # ------------------------------------------------------------------------------
+
+    # simple message-gain warmup schedule (feel free to tune)
+    def scheduled_message_gain(ep, base= float(gcfg.get("message_gain", 0.5))):
+        if ep < 100:  return 0.30
+        if ep < 200:  return 0.40
+        return base
 
     try:
         for epoch in trange(start_epoch, total_epochs + 1, desc="Epochs"):
             avg_loss = 0.0
             epoch_pixel, epoch_ssim, epoch_psnr = [], [], []
 
+            # set epoch-level base gain (then toggled by msg_rate/msg_every)
+            base_gain_epoch = scheduled_message_gain(epoch)
+
             for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
                 idx, batch = pool.sample(batch_size)
                 state = batch.to(device)
 
-                # Pick rollout regime
+                # Damage curriculum: apply BEFORE rollout so model learns to repair
+                if epoch >= damage_start_ep and damage_prob > 0 and damage_patch_size > 0:
+                    apply_square_damage_(state, damage_patch_size, damage_prob)
+
+                # rollout regime
                 if random.random() < long_prob:
                     steps_lo, steps_hi = long_min, long_max
                 else:
@@ -248,14 +283,11 @@ def main():
                 max_steps = int(nca_steps.max().item())
 
                 # Rollout with random fire-rate & temporally sparse messages
-                base_gain = float(getattr(model, "message_gain", 0.5))
-
                 for t in range(max_steps):
                     mask = (nca_steps > t)
                     if not mask.any():
                         continue
 
-                    # fire-rate for this internal step
                     fr = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
 
                     # decide whether to use graph this step
@@ -266,20 +298,23 @@ def main():
                         use_graph = (random.random() < msg_rate)
 
                     if hasattr(model, "message_gain"):
-                        model.message_gain = base_gain if use_graph else 0.0
+                        model.message_gain = base_gain_epoch if use_graph else 0.0
 
                     state[mask] = model(state[mask], fire_rate=fr)
 
-                # Restore original gain
+                # restore default gain
                 if hasattr(model, "message_gain"):
-                    model.message_gain = base_gain
+                    model.message_gain = base_gain_epoch
 
-                # Target batch
+                # Loss
                 target_expand = target.unsqueeze(0).expand_as(state[:, :4])
-
-                # Primary loss
-                per_sample = masked_loss(state[:, :4], target_expand,
-                                         alpha_thr=loss_alpha_thr, lam_area=loss_lam_area)
+                per_sample = masked_loss(
+                    state[:, :4], target_expand,
+                    alpha_thr=loss_alpha_thr,
+                    lam_area=loss_lam_area,
+                    lam_bg_alpha=loss_lam_bg_alpha,
+                    lam_bg_rgb=loss_lam_bg_rgb
+                )
                 loss = per_sample.mean()
 
                 # Stability phase
@@ -288,7 +323,6 @@ def main():
                         close_mask = (per_sample < stab_thresh)
                     if close_mask.any():
                         state_stab = state.clone()
-                        base_gain = float(getattr(model, "message_gain", 0.5))
                         for k in range(stab_K):
                             frs = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
                             use_graph = True
@@ -297,18 +331,12 @@ def main():
                             elif msg_rate < 1.0:
                                 use_graph = (random.random() < msg_rate)
                             if hasattr(model, "message_gain"):
-                                model.message_gain = base_gain if use_graph else 0.0
+                                model.message_gain = base_gain_epoch if use_graph else 0.0
                             state_stab[close_mask] = model(state_stab[close_mask], fire_rate=frs)
                         if hasattr(model, "message_gain"):
-                            model.message_gain = base_gain
+                            model.message_gain = base_gain_epoch
                         stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
                         loss = loss + stab_weight * stab
-
-                # Decide resets (apply after step on detached copy)
-                n_reset = int(reset_worst_prob * batch_size)
-                worst_indices = torch.topk(per_sample, n_reset).indices if n_reset > 0 else None
-                do_random_reseed = (random.random() < random_reseed_prob)
-                rand_idx = torch.randint(0, batch_size, (1,), device=device).item() if do_random_reseed else None
 
                 # Optimize
                 optimizer.zero_grad(set_to_none=True)
@@ -316,7 +344,13 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                 optimizer.step()
 
-                # Pool replace on detached copy
+                # Pool replace on detached copy (with occasional reseed)
+                per_sample_detached = per_sample.detach()
+                n_reset = int(reset_worst_prob * batch_size)
+                worst_indices = torch.topk(per_sample_detached, n_reset).indices if n_reset > 0 else None
+                do_random_reseed = (random.random() < random_reseed_prob)
+                rand_idx = torch.randint(0, batch_size, (1,), device=device).item() if do_random_reseed else None
+
                 state_for_pool = state.detach()
                 if (worst_indices is not None) or do_random_reseed:
                     state_for_pool = state_for_pool.clone()
@@ -326,7 +360,7 @@ def main():
                         state_for_pool[rand_idx:rand_idx+1] = seed_fn(1).detach()
                 pool.replace(idx, state_for_pool)
 
-                # Metrics (on current state)
+                # Metrics
                 pred = state[:, :4]
                 pred_img = pred[0].detach().cpu().numpy()
                 target_img = target.cpu().numpy()
@@ -357,13 +391,12 @@ def main():
                           f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                           f"Loss: {loss.item():.5f}")
 
-                # --------- NEW: if SLURM told us to stop, save & exit now ----------
+                # Early termination (SLURM)
                 if terminate["flag"]:
                     _save_ckpt(f"ep{epoch}_step{step+1}_last", epoch, global_step)
                     writer.flush(); writer.close()
                     print("[signal] Last checkpoint saved. Exiting.")
                     sys.exit(0)
-                # ------------------------------------------------------------------
 
             # End of epoch
             avg_loss /= steps_per_epoch
@@ -372,7 +405,6 @@ def main():
             ssim_scores.append(float(np.mean(epoch_ssim)))
             psnr_scores.append(float(np.mean(epoch_psnr)))
 
-            # Log row
             with open(os.path.join(logs_dir, "training_log.jsonl"), "a") as f:
                 f.write(json.dumps({
                     "epoch": epoch,
@@ -402,16 +434,14 @@ def main():
                 }, ckpt_path)
                 print(f"Model checkpoint saved to {ckpt_path}")
 
-            # Also honor termination right after epoch boundary
             if terminate["flag"]:
-                global_step = epoch * steps_per_epoch  # end-of-epoch step index
+                global_step = epoch * steps_per_epoch
                 _save_ckpt(f"epoch{epoch}_last", epoch, global_step)
                 writer.flush(); writer.close()
                 print("[signal] Last checkpoint saved at epoch boundary. Exiting.")
                 sys.exit(0)
 
     except Exception as e:
-        # Optional: write a last-ditch checkpoint on unexpected crash
         try:
             epoch_safe = locals().get("epoch", -1)
             step_safe  = locals().get("step", -1)
