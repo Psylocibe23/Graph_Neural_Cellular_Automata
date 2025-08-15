@@ -37,7 +37,7 @@
     "steps_per_epoch": 800,
     "nca_steps_min": 48,
     "nca_steps_max": 80,
-    "long_rollout_prob": 0.25,
+    "long_rollout_prob": 0.4,
     "long_rollout_steps_min": 200,
     "long_rollout_steps_max": 400,
     "fire_rate_min": 0.5,
@@ -55,11 +55,8 @@
     "stability_K": 24,
     "stability_threshold": 0.01,
     "stability_weight": 0.5,
-    "reset_worst_prob": 0.10, 
+    "reset_worst_prob": 0.15, 
     "random_reseed_prob": 0.05, 
-    "damage_patch_size": 10,
-    "damage_prob": 0.30,
-    "damage_start_epoch": 100,
     "loss_lam_bg_alpha": 1e-3,
     "loss_lam_bg_rgb": 2e-4,
     "scheduler": {
@@ -93,5 +90,28 @@
     "hidden_only": true,   
     "message_rate": 0.5,  
     "message_every": 1    
-  }
+  },
+
+  "damage": {
+  "start_epoch": 100,
+  "prob": 0.25,
+  "per_sample_prob": 0.5,                 
+  "kinds": {                   
+    "square": 0.35,
+    "circle": 0.25,
+    "stripes": 0.10,
+    "alpha_drop": 0.15,
+    "saltpepper": 0.05,
+    "gaussian": 0.10
+  },
+  "size_min": 6,
+  "size_max": 14,
+  "stripe_width": 6,
+  "alpha_thr": 0.1,
+  "alpha_dropout_p": 0.12,
+  "salt_pepper_p": 0.02,
+  "gaussian_softness": 0.35,
+  "hidden_noise_sigma": 0.0
+}
+
 }

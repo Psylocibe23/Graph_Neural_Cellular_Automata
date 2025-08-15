@@ -1,5 +1,5 @@
 # src/training/train_graph_ncagraph.py
-import os, re, glob, json, time, random, sys, signal
+import os, re, glob, json, time, random, sys, signal, shutil
 from datetime import datetime
 
 import numpy as np
@@ -19,6 +19,7 @@ from utils.utility_functions import count_parameters
 from utils.visualize import save_comparison
 
 from modules.ncagraph import NeuralCAGraph
+from utils.damage import apply_damage_policy_  # <— NEW: unified damage policy
 
 
 # ------------------------- Loss (with background penalties) ------------------
@@ -58,23 +59,6 @@ def extract_epoch_num(name):
     return int(m.group(1)) if m else -1
 
 
-def apply_square_damage_(state, patch, prob):
-    """
-    In-place damage on a subset of batch elements.
-    state: [B,C,H,W] (tensor)
-    patch: int, side length
-    prob: probability per-sample to apply one patch
-    """
-    B, C, H, W = state.shape
-    if patch <= 0 or prob <= 0:
-        return
-    for b in range(B):
-        if random.random() < prob:
-            py = random.randint(0, max(0, H - patch))
-            px = random.randint(0, max(0, W - patch))
-            state[b, :, py:py+patch, px:px+patch] = 0.0  # zero all channels
-
-
 # ================================== main =====================================
 def main():
     start_wall = time.time()
@@ -91,8 +75,12 @@ def main():
     for d in [results_dir, inter_dir, ckpt_dir, tb_dir, logs_dir]:
         os.makedirs(d, exist_ok=True)
 
+    # ---- RNG seeds ----
     device = config["misc"]["device"]
-    torch.manual_seed(int(config["misc"]["seed"]))
+    seed = int(config["misc"]["seed"])
+    torch.manual_seed(seed)
+    random.seed(seed)
+    np.random.seed(seed)
 
     # ---- Data ----
     target   = load_single_target_image(config).to(device)  # [4,H,W]
@@ -172,36 +160,26 @@ def main():
     fr_min          = float(config["training"].get("fire_rate_min", 0.5))
     fr_max          = float(config["training"].get("fire_rate_max", 1.0))
 
-    # damage curriculum
-    damage_prob       = float(config["training"].get("damage_prob", 0.0))
-    damage_patch_size = int(config["training"].get("damage_patch_size", 0))
-    damage_start_ep   = int(config["training"].get("damage_start_epoch", 100))  # << start at 100
-
-    log_interval    = int(config["logging"]["log_interval"])
-    visualize_every = int(config["logging"]["visualize_interval"])
-    ckpt_interval   = int(config["logging"].get("checkpoint_interval_epochs", 25))
-
-    # resets
-    reset_worst_prob   = float(config["training"].get("reset_worst_prob", 0.10))
-    random_reseed_prob = float(config["training"].get("random_reseed_prob", 0.05))
-
     # stability phase
     stab_enabled   = bool(config["training"].get("stability_enabled", True))
     stab_K         = int(config["training"].get("stability_K", 24))
     stab_thresh    = float(config["training"].get("stability_threshold", 0.01))
     stab_weight    = float(config["training"].get("stability_weight", 0.5))
 
-    # loss knobs (expose bg penalties via config if present)
+    # loss knobs
     loss_alpha_thr = float(config["training"].get("loss_alpha_thr", 0.2))
     loss_lam_area  = float(config["training"].get("loss_lam_area", 5e-5))
     loss_lam_bg_alpha = float(config["training"].get("loss_lam_bg_alpha", 1e-3))
     loss_lam_bg_rgb   = float(config["training"].get("loss_lam_bg_rgb",   2e-4))
 
+    # damage config (new unified block)
+    damage_cfg = config.get("damage", {})
+
     # ---- Resume ----
-    ckpt_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
-    if ckpt_files:
-        ckpt_files.sort(key=extract_epoch_num)
-        last_ckpt = ckpt_files[-1]
+    ckpt_dir_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
+    if ckpt_dir_files:
+        ckpt_dir_files.sort(key=extract_epoch_num)
+        last_ckpt = ckpt_dir_files[-1]
         checkpoint = torch.load(last_ckpt, map_location=device)
         missing, unexpected = model.load_state_dict(checkpoint["model_state"], strict=False)
         if missing:   print(f"[resume] missing model keys: {missing}")
@@ -227,13 +205,14 @@ def main():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
 
     epoch_losses, pixel_scores, ssim_scores, psnr_scores = [], [], [], []
+    last_epoch_finished = start_epoch - 1  # careful default
 
     # graceful termination
     terminate = {"flag": False}
 
     def _save_ckpt(tag: str, epoch_val: int, global_step_val: int):
         ckpt_path = os.path.join(ckpt_dir, f"nca_{tag}.pt")
-        torch.save({
+        payload = {
             "epoch": epoch_val,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
@@ -241,7 +220,8 @@ def main():
             "config": config,
             "param_count": n_params,
             "global_step": global_step_val,
-        }, ckpt_path)
+        }
+        torch.save(payload, ckpt_path)
         print(f"[ckpt] saved {ckpt_path}")
 
     def _handle_term(signum, frame):
@@ -252,7 +232,7 @@ def main():
     signal.signal(signal.SIGINT,  _handle_term)
 
     # simple message-gain warmup schedule (feel free to tune)
-    def scheduled_message_gain(ep, base= float(gcfg.get("message_gain", 0.5))):
+    def scheduled_message_gain(ep, base=float(gcfg.get("message_gain", 0.5))):
         if ep < 100:  return 0.30
         if ep < 200:  return 0.40
         return base
@@ -269,9 +249,8 @@ def main():
                 idx, batch = pool.sample(batch_size)
                 state = batch.to(device)
 
-                # Damage curriculum: apply BEFORE rollout so model learns to repair
-                if epoch >= damage_start_ep and damage_prob > 0 and damage_patch_size > 0:
-                    apply_square_damage_(state, damage_patch_size, damage_prob)
+                # Damage curriculum: BEFORE rollout so the model learns to repair
+                apply_damage_policy_(state, damage_cfg, epoch)
 
                 # rollout regime
                 if random.random() < long_prob:
@@ -346,9 +325,9 @@ def main():
 
                 # Pool replace on detached copy (with occasional reseed)
                 per_sample_detached = per_sample.detach()
-                n_reset = int(reset_worst_prob * batch_size)
+                n_reset = int(float(config["training"].get("reset_worst_prob", 0.10)) * batch_size)
                 worst_indices = torch.topk(per_sample_detached, n_reset).indices if n_reset > 0 else None
-                do_random_reseed = (random.random() < random_reseed_prob)
+                do_random_reseed = (random.random() < float(config["training"].get("random_reseed_prob", 0.05)))
                 rand_idx = torch.randint(0, batch_size, (1,), device=device).item() if do_random_reseed else None
 
                 state_for_pool = state.detach()
@@ -379,20 +358,21 @@ def main():
                 global_step = (epoch - 1) * steps_per_epoch + step
                 writer.add_scalar('Loss/train', loss.item(), global_step)
 
-                if (step + 1) % visualize_every == 0:
+                if (step + 1) % int(config["logging"]["visualize_interval"]) == 0:
                     img = pred[0, :3].detach().cpu().clamp(0, 1)
                     writer.add_image('Predicted/sample', img, global_step)
                     save_path0 = os.path.join(results_dir, f"epoch{epoch}_step{step+1}_sample0.png")
                     save_grid_as_image(state[0], save_path0)
                     save_comparison(target, pred[0], f"{epoch}_step{step+1}_sample0", results_dir, upscale=4)
 
-                if (step + 1) % log_interval == 0:
+                if (step + 1) % int(config["logging"]["log_interval"]) == 0:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] "
                           f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                           f"Loss: {loss.item():.5f}")
 
                 # Early termination (SLURM)
                 if terminate["flag"]:
+                    last_epoch_finished = epoch  # ensure suffix is correct
                     _save_ckpt(f"ep{epoch}_step{step+1}_last", epoch, global_step)
                     writer.flush(); writer.close()
                     print("[signal] Last checkpoint saved. Exiting.")
@@ -405,6 +385,7 @@ def main():
             ssim_scores.append(float(np.mean(epoch_ssim)))
             psnr_scores.append(float(np.mean(epoch_psnr)))
 
+            # row log
             with open(os.path.join(logs_dir, "training_log.jsonl"), "a") as f:
                 f.write(json.dumps({
                     "epoch": epoch,
@@ -422,17 +403,35 @@ def main():
             if scheduler is not None:
                 scheduler.step()
 
-            # Checkpoint
+            # Checkpoint on schedule OR last epoch
+            ckpt_interval = int(config["logging"].get("checkpoint_interval_epochs", 25))
             if epoch % ckpt_interval == 0 or epoch == total_epochs:
+                ckpt_payload = {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+                    "config": config,
+                }
                 ckpt_path = os.path.join(ckpt_dir, f"nca_epoch{epoch}.pt")
+                torch.save(ckpt_payload, ckpt_path)
+                torch.save(ckpt_payload, os.path.join(ckpt_dir, "nca_latest.pt"))  # rolling latest
+                print(f"Model checkpoint saved to {ckpt_path} (and updated nca_latest.pt)")
+
+            # also update rolling latest every epoch (cheap, small file)
+            try:
                 torch.save({
                     "epoch": epoch,
                     "model_state": model.state_dict(),
                     "optimizer_state": optimizer.state_dict(),
                     "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
                     "config": config,
-                }, ckpt_path)
-                print(f"Model checkpoint saved to {ckpt_path}")
+                }, os.path.join(ckpt_dir, "nca_latest.pt"))
+            except Exception as e:
+                print(f"[warn] could not update nca_latest.pt: {e}")
+
+            # mark last finished epoch
+            last_epoch_finished = epoch
 
             if terminate["flag"]:
                 global_step = epoch * steps_per_epoch
@@ -443,7 +442,7 @@ def main():
 
     except Exception as e:
         try:
-            epoch_safe = locals().get("epoch", -1)
+            epoch_safe = locals().get("epoch", start_epoch - 1)
             step_safe  = locals().get("step", -1)
             global_step = (max(epoch_safe, 1) - 1) * steps_per_epoch + max(step_safe, 0)
             _save_ckpt(f"crash_ep{epoch_safe}_step{step_safe}", max(epoch_safe, 1), global_step)
@@ -451,15 +450,30 @@ def main():
         finally:
             raise
 
-    # Summary JSON
-    writer.flush(); writer.close()
-    log_data = {
+    # -------------------- AFTER TRAINING: always save a final checkpoint --------------------
+    try:
+        final_ckpt = os.path.join(ckpt_dir, f"nca_epoch{last_epoch_finished}_final.pt")
+        torch.save({
+            "epoch": last_epoch_finished,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+            "config": config,
+        }, final_ckpt)
+        # also refresh latest
+        shutil.copyfile(final_ckpt, os.path.join(ckpt_dir, "nca_latest.pt"))
+        print(f"[ckpt] final checkpoint saved to {final_ckpt} (and updated nca_latest.pt)")
+    except Exception as e:
+        print(f"[warn] could not save final checkpoint: {e}")
+
+    # -------------------- Summary JSON (with epoch suffix) ---------------------------------
+    log_summary = {
         "training_time_minutes": (time.time() - start_wall) / 60.0,
         "config": config,
         "parameter_count": n_params,
         "seed": config["misc"].get("seed"),
         "initial_loss": float(epoch_losses[0]) if epoch_losses else None,
-        "final_loss": float(avg_loss) if epoch_losses else None,
+        "final_loss": float(epoch_losses[-1]) if epoch_losses else None,
         "epoch_losses": epoch_losses,
         "average_pixel_perfection": float(np.mean(pixel_scores)) if pixel_scores else None,
         "pixel_perfection_per_epoch": pixel_scores,
@@ -468,9 +482,22 @@ def main():
         "average_psnr": float(np.mean(psnr_scores)) if psnr_scores else None,
         "psnr_per_epoch": psnr_scores
     }
-    with open(os.path.join(logs_dir, "training_log.json"), "w") as f:
-        json.dump(log_data, f, indent=2)
-    print(f"Saved training log to {os.path.join(logs_dir, 'training_log.json')}")
+    summary_path = os.path.join(logs_dir, f"training_log_ep{last_epoch_finished}.json")
+    with open(summary_path, "w") as f:
+        json.dump(log_summary, f, indent=2)
+    print(f"Saved training log to {summary_path}")
+
+    # Optional: copy the line-by-line log with a matching suffix
+    try:
+        src = os.path.join(logs_dir, "training_log.jsonl")
+        if os.path.exists(src):
+            dst = os.path.join(logs_dir, f"training_log_ep{last_epoch_finished}.jsonl")
+            shutil.copyfile(src, dst)
+            print(f"Copied row log to {dst}")
+    except Exception as e:
+        print(f"[warn] could not copy jsonl log: {e}")
+
+    writer.flush(); writer.close()
 
 
 if __name__ == "__main__":
