@@ -107,15 +107,18 @@ def main():
         update_gain=float(config["model"].get("update_gain", 0.1)),
         alpha_thr=float(config["model"].get("alpha_thr", 0.1)),
         use_groupnorm=bool(config["model"].get("use_groupnorm", True)),
+        # Graph knobs
         message_gain=float(gcfg.get("message_gain", 0.5)),
         hidden_only=bool(gcfg.get("hidden_only", True)),
         graph_d_model=int(gcfg.get("d_model", 16)),
         graph_attention_radius=int(gcfg.get("attention_radius", 4)),
         graph_num_neighbors=int(gcfg.get("num_neighbors", 8)),
         graph_gating_hidden=int(gcfg.get("gating_hidden", 32)),
+        graph_zero_padded_shift=False,   # <— IMPORTANT: no border band, no need in config
         device=device,
     ).to(device)
     model.train()
+
 
     # Temporal sparsity controls for graph messages
     msg_rate  = float(gcfg.get("message_rate", 1.0))
@@ -176,28 +179,54 @@ def main():
     damage_cfg = config.get("damage", {})
 
     # ---- Resume ----
-    ckpt_dir_files = glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt"))
-    if ckpt_dir_files:
-        ckpt_dir_files.sort(key=extract_epoch_num)
-        last_ckpt = ckpt_dir_files[-1]
-        checkpoint = torch.load(last_ckpt, map_location=device)
-        missing, unexpected = model.load_state_dict(checkpoint["model_state"], strict=False)
-        if missing:   print(f"[resume] missing model keys: {missing}")
-        if unexpected:print(f"[resume] unexpected model keys: {unexpected}")
-        try:
-            optimizer.load_state_dict(checkpoint["optimizer_state"])
-        except Exception as e:
-            print(f"[warn] optimizer state not compatible, reinitializing: {e}")
-        if scheduler is not None and checkpoint.get("scheduler_state") is not None:
+    def _pick_resume(ckpt_dir):
+        cand = []
+    
+        latest = os.path.join(ckpt_dir, "nca_latest.pt")
+        if os.path.exists(latest): cand.append(latest)
+    
+        cand += sorted(glob.glob(os.path.join(ckpt_dir, "nca_epoch*_final.pt")))
+        cand += sorted(glob.glob(os.path.join(ckpt_dir, "nca_*_last.pt")))
+        cand += sorted(glob.glob(os.path.join(ckpt_dir, "nca_crash_ep*.pt")))
+        cand += sorted(glob.glob(os.path.join(ckpt_dir, "nca_epoch*.pt")), key=extract_epoch_num)
+    
+        best_path, best_payload = None, None
+        best_epoch, best_step = -1, -1
+    
+        for p in cand:
             try:
-                scheduler.load_state_dict(checkpoint["scheduler_state"])
+                payload = torch.load(p, map_location="cpu")
+                ep = int(payload.get("epoch", -1))
+                # global_step may be missing in older files; fall back to ep
+                gs = int(payload.get("global_step", ep))
+                if ep > best_epoch or (ep == best_epoch and gs > best_step):
+                    best_epoch, best_step = ep, gs
+                    best_path, best_payload = p, payload
+            except Exception as _:
+                continue
+        return best_path, best_payload
+    
+    resume_path, resume_payload = _pick_resume(ckpt_dir)
+    if resume_path is not None:
+        missing, unexpected = model.load_state_dict(resume_payload["model_state"], strict=False)
+        if missing:   print(f"[resume] missing model keys: {missing}", flush=True)
+        if unexpected:print(f"[resume] unexpected model keys: {unexpected}", flush=True)
+        try:
+            optimizer.load_state_dict(resume_payload["optimizer_state"])
+        except Exception as e:
+            print(f"[warn] optimizer state not compatible, reinitializing: {e}", flush=True)
+        if scheduler is not None and resume_payload.get("scheduler_state") is not None:
+            try:
+                scheduler.load_state_dict(resume_payload["scheduler_state"])
             except Exception as e:
-                print(f"[warn] scheduler state not compatible, reinit: {e}")
-        start_epoch = checkpoint["epoch"] + 1
-        print(f"Resuming (fine-tune) from {last_ckpt} (epoch {checkpoint['epoch']})")
+                print(f"[warn] scheduler state not compatible, reinit: {e}", flush=True)
+    
+        start_epoch = int(resume_payload.get("epoch", 0)) + 1
+        print(f"Resuming from {resume_path} (epoch {start_epoch-1})", flush=True)
     else:
         start_epoch = 1
-        print("Starting training from scratch.")
+        print("Starting training from scratch.", flush=True)
+
 
     # ---- Bookkeeping ----
     n_params = count_parameters(model)
