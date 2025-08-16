@@ -57,8 +57,8 @@
     "stability_weight": 0.5,
     "reset_worst_prob": 0.15, 
     "random_reseed_prob": 0.05, 
-    "loss_lam_bg_alpha": 1e-3,
-    "loss_lam_bg_rgb": 2e-4,
+    "loss_lam_bg_alpha": 2e-3,
+    "loss_lam_bg_rgb": 4e-4,
     "scheduler": {
       "type": "StepLR",
       "step_size": 50,
@@ -77,8 +77,7 @@
 
   "misc": {
     "device": "cuda",
-    "seed": 42,
-    "num_workers": 8
+    "seed": 42
   },
 
   "graph_augmentation": {
