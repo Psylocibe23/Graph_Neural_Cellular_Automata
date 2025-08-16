@@ -26,8 +26,8 @@
 
     "layer_norm": false,
     "fire_rate": 0.5,      
-    "update_gain": 0.1,    
-    "alpha_thr": 0.1,                  
+    "update_gain": 0.08,    
+    "alpha_thr": 0.2,                  
     "use_groupnorm": true             
   },
 
@@ -50,15 +50,15 @@
     "gradient_clip": 1.0,
     "loss": "masked_target_mse",
     "loss_alpha_thr": 0.2,
-    "loss_lam_area": 5e-5,
+    "loss_lam_area": 0.0,
     "stability_enabled": true,
     "stability_K": 24,
     "stability_threshold": 0.01,
     "stability_weight": 0.5,
     "reset_worst_prob": 0.15, 
     "random_reseed_prob": 0.05, 
-    "loss_lam_bg_alpha": 2e-3,
-    "loss_lam_bg_rgb": 4e-4,
+    "loss_lam_bg_alpha": 0.003,
+    "loss_lam_bg_rgb": 0.0005,
     "scheduler": {
       "type": "StepLR",
       "step_size": 50,
@@ -82,12 +82,12 @@
 
   "graph_augmentation": {
     "d_model": 16,
-    "attention_radius": 3,
-    "num_neighbors": 8,
+    "attention_radius": 5,
+    "num_neighbors": 16,
     "gating_hidden": 32,
-    "message_gain": 0.5,  
+    "message_gain": 0.4,  
     "hidden_only": true,   
-    "message_rate": 0.5,  
+    "message_rate": 0.3,  
     "message_every": 1    
   },
 
