@@ -72,7 +72,7 @@
     "save_interval": 1000,
     "results_dir": "outputs",
     "checkpoint_dir": "outputs/checkpoints",
-    "visualize_interval": 500
+    "visualize_interval": 1000
   },
 
   "misc": {
