@@ -259,11 +259,11 @@ def main():
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
     # Pick your checkpoint (graphaug run)
-    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch120.pt"
+    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch200.pt"
     out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
     os.makedirs(out_dir, exist_ok=True)
 
-    STEPS      = 200       # how many CA steps to roll
+    STEPS      = 300       # how many CA steps to roll
     UPSCALE    = 4         # upscale for the RGB view
     FR_RANDOM  = False     # use random fire rate like training
     FR_FIXED   = 0.5

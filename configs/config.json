@@ -37,25 +37,25 @@
     "steps_per_epoch": 800,
     "nca_steps_min": 48,
     "nca_steps_max": 80,
-    "long_rollout_prob": 0.4,
+    "long_rollout_prob": 0.5,
     "long_rollout_steps_min": 200,
-    "long_rollout_steps_max": 400,
+    "long_rollout_steps_max": 450,
     "fire_rate_min": 0.5,
     "fire_rate_max": 1.0,
 
     "num_epochs": 1000,
-    "learning_rate": 0.0005,
+    "learning_rate": 0.0002,
     "optimizer": "Adam",
     "weight_decay": 1e-5,
     "gradient_clip": 1.0,
     "loss": "masked_target_mse",
     "loss_alpha_thr": 0.2,
-    "loss_lam_area": 0.0,
+    "loss_lam_area": 2e-5,
     "stability_enabled": true,
-    "stability_K": 24,
+    "stability_K": 32,
     "stability_threshold": 0.01,
-    "stability_weight": 0.5,
-    "reset_worst_prob": 0.15, 
+    "stability_weight": 0.6,
+    "reset_worst_prob": 0.10, 
     "random_reseed_prob": 0.05, 
     "loss_lam_bg_alpha": 0.003,
     "loss_lam_bg_rgb": 0.0005,
@@ -72,7 +72,7 @@
     "save_interval": 1000,
     "results_dir": "outputs",
     "checkpoint_dir": "outputs/checkpoints",
-    "visualize_interval": 1000
+    "visualize_interval": 800
   },
 
   "misc": {
@@ -87,14 +87,14 @@
     "gating_hidden": 32,
     "message_gain": 0.4,  
     "hidden_only": true,   
-    "message_rate": 0.3,  
+    "message_rate": 0.35,  
     "message_every": 1    
   },
 
   "damage": {
   "start_epoch": 100,
-  "prob": 0.25,
-  "per_sample_prob": 0.5,                 
+  "prob": 0.4,
+  "per_sample_prob": 0.6,                 
   "kinds": {                   
     "square": 0.35,
     "circle": 0.25,
@@ -104,13 +104,13 @@
     "gaussian": 0.10
   },
   "size_min": 6,
-  "size_max": 14,
+  "size_max": 18,
   "stripe_width": 6,
   "alpha_thr": 0.1,
-  "alpha_dropout_p": 0.12,
+  "alpha_dropout_p": 0.15,
   "salt_pepper_p": 0.02,
   "gaussian_softness": 0.35,
-  "hidden_noise_sigma": 0.0
+  "hidden_noise_sigma": 0.01
 }
 
 }
