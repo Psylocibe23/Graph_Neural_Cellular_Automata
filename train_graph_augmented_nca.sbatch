@@ -4,7 +4,7 @@
 #SBATCH --account=dssc
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/train_graph_%j.out
 #SBATCH --error=logs/train_graph_%j.err
