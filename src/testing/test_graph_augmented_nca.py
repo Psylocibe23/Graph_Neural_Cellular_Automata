@@ -259,7 +259,7 @@ def main():
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
     # Pick your checkpoint (graphaug run)
-    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch200.pt"
+    ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch270.pt"
     out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
     os.makedirs(out_dir, exist_ok=True)
 
