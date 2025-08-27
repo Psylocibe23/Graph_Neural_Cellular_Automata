@@ -41,7 +41,7 @@
     "long_rollout_steps_min": 200,
     "long_rollout_steps_max": 400,
     "fire_rate_min": 0.5,
-    "fire_rate_max": 1.0,
+    "fire_rate_max": 0.9,
 
     "num_epochs": 1000,
     "learning_rate": 0.0002,
@@ -49,15 +49,15 @@
     "weight_decay": 1e-5,
     "gradient_clip": 1.0,
     "loss": "masked_target_mse",
-    "loss_alpha_thr": 0.2,
-    "loss_lam_area": 2e-4,
+    "loss_alpha_thr": 0.25,
+    "loss_lam_area": 6e-4,
     "stability_enabled": true,
-    "stability_K": 24,
-    "stability_threshold": 0.01,
+    "stability_K": 32,
+    "stability_threshold": 0.02,
     "stability_weight": 0.55,
     "reset_worst_prob": 0.10, 
     "random_reseed_prob": 0.05, 
-    "loss_lam_bg_alpha": 0.008,
+    "loss_lam_bg_alpha": 0.015,
     "loss_lam_bg_rgb": 0.0005,
     "scheduler": {
       "type": "StepLR",
@@ -83,7 +83,7 @@
   "graph_augmentation": {
     "d_model": 16,
     "attention_radius": 4,
-    "num_neighbors": 10,
+    "num_neighbors": 8,
     "gating_hidden": 32,
     "message_gain": 0.3,  
     "hidden_only": true,   
@@ -93,8 +93,8 @@
 
   "damage": {
   "start_epoch": 100,
-  "prob": 0.4,
-  "per_sample_prob": 0.5,                 
+  "prob": 0.3,
+  "per_sample_prob": 0.4,                 
   "kinds": {                   
     "square": 0.35,
     "circle": 0.25,
