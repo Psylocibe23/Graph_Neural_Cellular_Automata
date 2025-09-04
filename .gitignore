@@ -1,8 +1,13 @@
 agnn_env/
 __pycache__/
 *.pyc
-outputs/
-data/
+
+# Ignore contents, but keep .gitkeep files anywhere inside
+outputs/*
+!outputs/**/.gitkeep
+
+data/*
+!data/**/.gitkeep
 .env
 .ipynb_checkpoints
 *.pt
