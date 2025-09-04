@@ -17,7 +17,6 @@ We build on the classic differentiable Neural Cellular Automata (NCA) and augmen
 - `src/training/train_intermediate_loss.py` — Classic NCA trainer using TARGET-masked MSE + tiny alpha-area penalty with short/long rollouts and optional stability.
 
 ### Testing / Analysis
-- `src/testing/test_graph_attention_evolution.py` — Rolls the graph model and visualizes attention maps, sender/receiver masks, and per-offset contributions over time.
 - `src/testing/test_graph_augmented_nca.py` — Diagnostic rollout that saves RGB/attention panels and offset tiles to inspect graph behavior step-by-step.
 - `src/testing/test_graph_augmented_regeneration.py` — Regrowth/repair tests: applies specific damage kinds at a chosen step and writes PNG/MP4 sequences.
 - `src/testing/test_intermediate_loss.py` — Classic NCA growth demo from a seed; saves frame grids and optional side-by-side with the target.
@@ -25,7 +24,6 @@ We build on the classic differentiable Neural Cellular Automata (NCA) and augmen
 ### Utils
 - `src/utils/config.py` — Loads `configs/config.json` and exposes typed accessors for training/testing.
 - `src/utils/image.py` — Reads RGBA targets (PNG), normalizes to [0,1], and returns tensors shaped for the CA.
-- `src/utils/nca_init.py` — Seeding utilities: centered alpha seed plus tiny hidden noise for faster morphogenesis.
 - `src/training/pool.py` — Simple replay/pool of CA states with sample/replace to maintain diversity.
 - `src/utils/visualize.py` — Side-by-side target vs. prediction compositing and image saving helpers.
 - `src/utils/utility_functions.py` — Small helpers: parameter counting, formatting, and misc utilities.
@@ -33,7 +31,6 @@ We build on the classic differentiable Neural Cellular Automata (NCA) and augmen
 
 ### Configs & Data
 - `configs/config.json` — Central configuration for data, model, training, logging, graph, and damage knobs.
-- `configs/config_annotated.jsonc` — Commented (JSONC) companion of the config for documentation/Overleaf (not parsed by the code).
 - `data/emojis/` — RGBA targets used for training and evaluation (e.g., `gecko.png`, `heart.png`).
 
 ### Outputs
