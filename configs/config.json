@@ -14,34 +14,31 @@
       "real_gecko.png"
     ],
     "active_target": "gecko.png",
-    "img_size": 40
+    "img_size": 40 
   },
 
   "model": {
-    "n_channels": 16,
-
-    "perception": { "sobel": true, "identity": true },
-
-    "update_mlp": { "hidden_dim": 128, "layers": 2 },
-
+    "n_channels": 16,  
+    "perception": { "sobel": true, "identity": true }, 
+    "update_mlp": { "hidden_dim": 128, "layers": 2 }, 
     "layer_norm": false,
-    "fire_rate": 0.5,      
+    "fire_rate": 0.5,       
     "update_gain": 0.06,    
-    "alpha_thr": 0.25,                  
-    "use_groupnorm": true             
+    "alpha_thr": 0.25,                   
+    "use_groupnorm": true           
   },
 
   "training": {
-    "pool_size": 1024,
+    "pool_size": 1024,   
     "batch_size": 16,
     "steps_per_epoch": 800,
-    "nca_steps_min": 48,
-    "nca_steps_max": 80,
-    "long_rollout_prob": 0.4,
-    "long_rollout_steps_min": 200,
-    "long_rollout_steps_max": 400,
-    "fire_rate_min": 0.5,
-    "fire_rate_max": 0.9,
+    "nca_steps_min": 48,  
+    "nca_steps_max": 80,  
+    "long_rollout_prob": 0.4, 
+    "long_rollout_steps_min": 200, 
+    "long_rollout_steps_max": 400,  
+    "fire_rate_min": 0.5,  
+    "fire_rate_max": 0.9,  
 
     "num_epochs": 1000,
     "learning_rate": 0.0002,
