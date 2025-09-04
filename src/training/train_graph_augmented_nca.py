@@ -1,7 +1,5 @@
-# src/training/train_graph_ncagraph.py
 import os, re, glob, json, time, random, sys, signal, shutil
 from datetime import datetime
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -10,17 +8,26 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
-
 from utils.config import load_config
 from utils.image import load_single_target_image
 from training.pool import SamplePool
 from utils.nca_init import make_seed
 from utils.utility_functions import count_parameters
 from utils.visualize import save_comparison
-
 from modules.ncagraph import NeuralCAGraph
 from utils.damage import apply_damage_policy_  # <— NEW: unified damage policy
 
+"""
+Trainer for Graph-Augmented NCA.
+Reads configs/config.json, builds NeuralCAGraph, and optimizes a TARGET-masked
+loss with background penalties (alpha area + BG alpha/RGB). Uses a SamplePool,
+mixed short/long rollouts, stochastic fire-rate, and temporally-sparse graph
+messages (message_rate/message_every) with a light message_gain warm-up.
+Applies curriculum damage before rollouts and a stability phase (extra K steps)
+for near-target states to penalize drift. Logs TB scalars/images + pixel-
+perfection/SSIM/PSNR, checkpoints with robust auto-resume and SIGTERM-safe
+“last” saves, and writes per-epoch JSON/JSONL summaries.
+"""
 
 # ------------------------- Loss (with background penalties) ------------------
 def masked_loss(pred, target, alpha_thr=0.2,
@@ -32,15 +39,15 @@ def masked_loss(pred, target, alpha_thr=0.2,
     - Tiny background RGB penalty: pred RGB on TARGET-dead
     """
     tgt_alive = (target[:, 3:4] > alpha_thr).float()
-    tgt_dead  = 1.0 - tgt_alive
+    tgt_dead = 1.0 - tgt_alive
 
     mse = ((pred - target) ** 2) * tgt_alive
     denom = tgt_alive.sum(dim=(1, 2, 3)) + 1e-8
     primary = mse.sum(dim=(1, 2, 3)) / denom
 
     bg_alpha_pen = lam_bg_alpha * (pred[:, 3:4] * tgt_dead).mean(dim=(1, 2, 3))
-    bg_rgb_pen   = lam_bg_rgb   * (pred[:, :3]  * tgt_dead).abs().mean(dim=(1, 2, 3))
-    area_pen     = lam_area * pred[:, 3:4].mean(dim=(1, 2, 3))
+    bg_rgb_pen = lam_bg_rgb   * (pred[:, :3]  * tgt_dead).abs().mean(dim=(1, 2, 3))
+    area_pen = lam_area * pred[:, 3:4].mean(dim=(1, 2, 3))
 
     return primary + bg_alpha_pen + bg_rgb_pen + area_pen
 
@@ -52,30 +59,28 @@ def save_grid_as_image(grid, filename):
     img = grid[:4].permute(1, 2, 0).numpy().clip(0, 1)
     plt.imsave(filename, img)
 
-
-# ----------------------------- small helpers ---------------------------------
 def extract_epoch_num(name):
     m = re.search(r'epoch(\d+)', name)
     return int(m.group(1)) if m else -1
 
 
-# ================================== main =====================================
+# --- MAIN ---
 def main():
     start_wall = time.time()
     config = load_config("configs/config.json")
 
-    # ---- IO ----
+    # ---- I/O ----
     target_name = os.path.splitext(config["data"]["active_target"])[0]
     base_dir = os.path.join("outputs", "graphaug_nca", "train_inter_loss", target_name)
     results_dir = os.path.join(base_dir, "images")
-    inter_dir   = os.path.join(base_dir, "intermediate")
-    ckpt_dir    = os.path.join(base_dir, "checkpoints")
-    tb_dir      = os.path.join(base_dir, "tb_logs")
-    logs_dir    = os.path.join(base_dir, "logs")
+    inter_dir = os.path.join(base_dir, "intermediate")
+    ckpt_dir = os.path.join(base_dir, "checkpoints")
+    tb_dir = os.path.join(base_dir, "tb_logs")
+    logs_dir = os.path.join(base_dir, "logs")
     for d in [results_dir, inter_dir, ckpt_dir, tb_dir, logs_dir]:
         os.makedirs(d, exist_ok=True)
 
-    # ---- RNG seeds ----
+    # ---- seeds ----
     device = config["misc"]["device"]
     seed = int(config["misc"]["seed"])
     torch.manual_seed(seed)
@@ -83,13 +88,13 @@ def main():
     np.random.seed(seed)
 
     # ---- Data ----
-    target   = load_single_target_image(config).to(device)  # [4,H,W]
+    target = load_single_target_image(config).to(device)  # [4,H,W]
     img_size = int(config["data"]["img_size"])
-    n_ch     = int(config["model"]["n_channels"])
+    n_ch = int(config["model"]["n_channels"])
 
     writer = SummaryWriter(log_dir=tb_dir)
 
-    # ---- Seed ----
+    # ---- Seed funciton ----
     def seed_fn(batch_size=1):
         g = torch.zeros(batch_size, n_ch, img_size, img_size, device=device)
         cy = img_size // 2; cx = img_size // 2
@@ -114,15 +119,15 @@ def main():
         graph_attention_radius=int(gcfg.get("attention_radius", 4)),
         graph_num_neighbors=int(gcfg.get("num_neighbors", 8)),
         graph_gating_hidden=int(gcfg.get("gating_hidden", 32)),
-        graph_zero_padded_shift=False,   # <— IMPORTANT: no border band, no need in config
+        graph_zero_padded_shift=False, 
         device=device,
     ).to(device)
     model.train()
 
 
-    # Temporal sparsity controls for graph messages
-    msg_rate  = float(gcfg.get("message_rate", 1.0))
-    msg_every = int(gcfg.get("message_every", 1))  # 1 = every step
+    # --- Temporal sparsity controls for graph messages ---
+    msg_rate = float(gcfg.get("message_rate", 1.0))
+    msg_every = int(gcfg.get("message_every", 1)) 
 
     # ---- Optimizer / Scheduler ----
     optimizer = torch.optim.Adam(
@@ -152,30 +157,29 @@ def main():
     pool = SamplePool(int(config["training"]["pool_size"]), seed_fn, device=device)
 
     # ---- Training knobs ----
-    total_epochs    = int(config["training"]["num_epochs"])
+    total_epochs = int(config["training"]["num_epochs"])
     steps_per_epoch = int(config["training"]["steps_per_epoch"])
-    batch_size      = int(config["training"]["batch_size"])
-    short_min       = int(config["training"]["nca_steps_min"])
-    short_max       = int(config["training"]["nca_steps_max"])
-    long_prob       = float(config["training"].get("long_rollout_prob", 0.25))
-    long_min        = int(config["training"].get("long_rollout_steps_min", 200))
-    long_max        = int(config["training"].get("long_rollout_steps_max", 400))
-    fr_min          = float(config["training"].get("fire_rate_min", 0.5))
-    fr_max          = float(config["training"].get("fire_rate_max", 1.0))
+    batch_size = int(config["training"]["batch_size"])
+    short_min = int(config["training"]["nca_steps_min"])
+    short_max = int(config["training"]["nca_steps_max"])
+    long_prob = float(config["training"].get("long_rollout_prob", 0.25))
+    long_min = int(config["training"].get("long_rollout_steps_min", 200))
+    long_max = int(config["training"].get("long_rollout_steps_max", 400))
+    fr_min = float(config["training"].get("fire_rate_min", 0.5))
+    fr_max = float(config["training"].get("fire_rate_max", 1.0))
 
-    # stability phase
-    stab_enabled   = bool(config["training"].get("stability_enabled", True))
-    stab_K         = int(config["training"].get("stability_K", 24))
-    stab_thresh    = float(config["training"].get("stability_threshold", 0.01))
-    stab_weight    = float(config["training"].get("stability_weight", 0.5))
+    # --- stability phase ---
+    stab_enabled = bool(config["training"].get("stability_enabled", True))
+    stab_K = int(config["training"].get("stability_K", 24))
+    stab_thresh = float(config["training"].get("stability_threshold", 0.01))
+    stab_weight = float(config["training"].get("stability_weight", 0.5))
 
-    # loss knobs
+    # --- loss knobs ---
     loss_alpha_thr = float(config["training"].get("loss_alpha_thr", 0.2))
-    loss_lam_area  = float(config["training"].get("loss_lam_area", 5e-5))
+    loss_lam_area = float(config["training"].get("loss_lam_area", 5e-5))
     loss_lam_bg_alpha = float(config["training"].get("loss_lam_bg_alpha", 1e-3))
-    loss_lam_bg_rgb   = float(config["training"].get("loss_lam_bg_rgb",   2e-4))
+    loss_lam_bg_rgb = float(config["training"].get("loss_lam_bg_rgb",   2e-4))
 
-    # damage config (new unified block)
     damage_cfg = config.get("damage", {})
 
     # ---- Resume ----
@@ -209,7 +213,7 @@ def main():
     resume_path, resume_payload = _pick_resume(ckpt_dir)
     if resume_path is not None:
         missing, unexpected = model.load_state_dict(resume_payload["model_state"], strict=False)
-        if missing:   print(f"[resume] missing model keys: {missing}", flush=True)
+        if missing: print(f"[resume] missing model keys: {missing}", flush=True)
         if unexpected:print(f"[resume] unexpected model keys: {unexpected}", flush=True)
         try:
             optimizer.load_state_dict(resume_payload["optimizer_state"])
@@ -234,9 +238,8 @@ def main():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting training for {total_epochs} epochs")
 
     epoch_losses, pixel_scores, ssim_scores, psnr_scores = [], [], [], []
-    last_epoch_finished = start_epoch - 1  # careful default
+    last_epoch_finished = start_epoch - 1 
 
-    # graceful termination
     terminate = {"flag": False}
 
     def _save_ckpt(tag: str, epoch_val: int, global_step_val: int):
@@ -260,7 +263,7 @@ def main():
     signal.signal(signal.SIGTERM, _handle_term)
     signal.signal(signal.SIGINT,  _handle_term)
 
-    # simple message-gain warmup schedule (feel free to tune)
+    # --- simple message-gain warmup schedule ---
     def scheduled_message_gain(ep, base=float(gcfg.get("message_gain", 0.5))):
         if ep < 100:  return 0.30
         if ep < 200:  return 0.40
@@ -271,17 +274,16 @@ def main():
             avg_loss = 0.0
             epoch_pixel, epoch_ssim, epoch_psnr = [], [], []
 
-            # set epoch-level base gain (then toggled by msg_rate/msg_every)
             base_gain_epoch = scheduled_message_gain(epoch)
 
             for step in trange(steps_per_epoch, desc=f"Epoch {epoch}", leave=False):
                 idx, batch = pool.sample(batch_size)
                 state = batch.to(device)
 
-                # Damage curriculum: BEFORE rollout so the model learns to repair
+                # --- Damage curriculum ---
                 apply_damage_policy_(state, damage_cfg, epoch)
 
-                # rollout regime
+                # --- rollout regime ---
                 if random.random() < long_prob:
                     steps_lo, steps_hi = long_min, long_max
                 else:
@@ -290,7 +292,6 @@ def main():
                 nca_steps = torch.randint(steps_lo, steps_hi + 1, (batch_size,), device=device)
                 max_steps = int(nca_steps.max().item())
 
-                # Rollout with random fire-rate & temporally sparse messages
                 for t in range(max_steps):
                     mask = (nca_steps > t)
                     if not mask.any():
@@ -298,7 +299,6 @@ def main():
 
                     fr = float(torch.empty(1, device=device).uniform_(fr_min, fr_max).item())
 
-                    # decide whether to use graph this step
                     use_graph = True
                     if msg_every > 1:
                         use_graph = (t % msg_every == 0)
@@ -310,11 +310,10 @@ def main():
 
                     state[mask] = model(state[mask], fire_rate=fr)
 
-                # restore default gain
                 if hasattr(model, "message_gain"):
                     model.message_gain = base_gain_epoch
 
-                # Loss
+                # --- Loss ---
                 target_expand = target.unsqueeze(0).expand_as(state[:, :4])
                 per_sample = masked_loss(
                     state[:, :4], target_expand,
@@ -325,7 +324,7 @@ def main():
                 )
                 loss = per_sample.mean()
 
-                # Stability phase
+                # --- Stability phase ---
                 if stab_enabled:
                     with torch.no_grad():
                         close_mask = (per_sample < stab_thresh)
@@ -346,13 +345,13 @@ def main():
                         stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
                         loss = loss + stab_weight * stab
 
-                # Optimize
+                # --- Optimize ---
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                 optimizer.step()
 
-                # Pool replace on detached copy (with occasional reseed)
+                # --- Pool replace ---
                 per_sample_detached = per_sample.detach()
                 n_reset = int(float(config["training"].get("reset_worst_prob", 0.10)) * batch_size)
                 worst_indices = torch.topk(per_sample_detached, n_reset).indices if n_reset > 0 else None
@@ -368,7 +367,7 @@ def main():
                         state_for_pool[rand_idx:rand_idx+1] = seed_fn(1).detach()
                 pool.replace(idx, state_for_pool)
 
-                # Metrics
+                # --- Metrics ---
                 pred = state[:, :4]
                 pred_img = pred[0].detach().cpu().numpy()
                 target_img = target.cpu().numpy()
@@ -383,7 +382,7 @@ def main():
 
                 avg_loss += loss.item()
 
-                # Logging
+                # --- Logging ---
                 global_step = (epoch - 1) * steps_per_epoch + step
                 writer.add_scalar('Loss/train', loss.item(), global_step)
 
@@ -399,22 +398,21 @@ def main():
                           f"Epoch [{epoch}/{total_epochs}], Step [{step+1}/{steps_per_epoch}], "
                           f"Loss: {loss.item():.5f}")
 
-                # Early termination (SLURM)
                 if terminate["flag"]:
-                    last_epoch_finished = epoch  # ensure suffix is correct
+                    last_epoch_finished = epoch 
                     _save_ckpt(f"ep{epoch}_step{step+1}_last", epoch, global_step)
                     writer.flush(); writer.close()
                     print("[signal] Last checkpoint saved. Exiting.")
                     sys.exit(0)
 
-            # End of epoch
+            # --- End of epoch ---
             avg_loss /= steps_per_epoch
             epoch_losses.append(avg_loss)
             pixel_scores.append(float(np.mean(epoch_pixel)))
             ssim_scores.append(float(np.mean(epoch_ssim)))
             psnr_scores.append(float(np.mean(epoch_psnr)))
 
-            # row log
+            # --- row log ---
             with open(os.path.join(logs_dir, "training_log.jsonl"), "a") as f:
                 f.write(json.dumps({
                     "epoch": epoch,
@@ -432,7 +430,7 @@ def main():
             if scheduler is not None:
                 scheduler.step()
 
-            # Checkpoint on schedule OR last epoch
+            # --- Checkpoint ---
             ckpt_interval = int(config["logging"].get("checkpoint_interval_epochs", 25))
             if epoch % ckpt_interval == 0 or epoch == total_epochs:
                 ckpt_payload = {
@@ -447,7 +445,7 @@ def main():
                 torch.save(ckpt_payload, os.path.join(ckpt_dir, "nca_latest.pt"))  # rolling latest
                 print(f"Model checkpoint saved to {ckpt_path} (and updated nca_latest.pt)")
 
-            # also update rolling latest every epoch (cheap, small file)
+            # also update rolling latest every epoch
             try:
                 torch.save({
                     "epoch": epoch,
@@ -515,8 +513,6 @@ def main():
     with open(summary_path, "w") as f:
         json.dump(log_summary, f, indent=2)
     print(f"Saved training log to {summary_path}")
-
-    # Optional: copy the line-by-line log with a matching suffix
     try:
         src = os.path.join(logs_dir, "training_log.jsonl")
         if os.path.exists(src):
