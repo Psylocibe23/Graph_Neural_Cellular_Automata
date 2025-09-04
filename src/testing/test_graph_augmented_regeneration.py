@@ -1,20 +1,40 @@
-# src/testing/test_graph_attention_evolution.py
-
 """
 PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py   --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch380.pt \
   --target gecko \
   --include-clean
 """
-
 import os, re, glob, math, random, argparse, json, sys
 import numpy as np
 import torch, torch.nn.functional as F
 import matplotlib.pyplot as plt
-
 from utils.config import load_config
 from utils.nca_init import make_seed
 from utils.damage import apply_damage_policy_
 from modules.ncagraph import NeuralCAGraph
+
+"""
+test_graph_augmented_regeneration.py — per-damage regeneration test + attention logging.
+Evaluate a trained Graph-NCA checkpoint under different, controlled damage types.
+For each damage kind, the script applies one damage event at a chosen step, then
+records growth/regrowth dynamics and graph-attention diagnostics.
+
+What it does
+  - Loads config, builds NeuralCAGraph with training knobs, and loads the exact --ckpt-path.
+  - Selects damage kinds from --kinds or from config.damage.kinds; optionally adds a clean run.
+  - For each kind, runs a single-seed rollout for --steps:
+      – applies that specific damage once at --damage-step,
+      – saves per-step panels “combo_###.png” (RGB masked, attention heatmap,
+        attention overlaid with sender/receiver, per-group message magnitudes RGB/α/hidden),
+      – saves attention-only frames “attn_only_###.png”.
+  - Writes videos (attention.mp4, combo.mp4) if imageio is available and a meta.json with settings.
+  - Normalizes Windows paths to WSL so --out-root works on both Windows and WSL.
+
+Example
+  PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py 
+    --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch380.pt 
+    --target gecko --include-clean
+"""
+
 
 # ---------- utils ----------
 def to_np(x):
@@ -25,7 +45,7 @@ def to_np(x):
 def masked_rgb(x4, alpha_thr=0.1, upscale=1):
     if x4.ndim == 4: x4 = x4[0]
     rgb = x4[:3].detach().cpu()
-    a   = x4[3:4].detach().cpu()
+    a = x4[3:4].detach().cpu()
     m = (a > alpha_thr).float()
     rgb = rgb * m
     img = rgb.permute(1, 2, 0).numpy().clip(0, 1)
@@ -46,7 +66,7 @@ def save_combo(step, out_dir, rgb_img, attn, sender, receiver, group_maps):
     os.makedirs(out_dir, exist_ok=True)
     attn_np, sender_np, receiver_np = map(to_np, (attn, sender, receiver))
     rgb_np = to_np(rgb_img)
-    rgb_map_np   = to_np(group_maps["rgb"])
+    rgb_map_np = to_np(group_maps["rgb"])
     alpha_map_np = to_np(group_maps["alpha"])
     hidden_map_np= to_np(group_maps["hidden"])
 
@@ -98,7 +118,7 @@ def main():
     ap.add_argument("--ckpt-path", required=True, help="Exact checkpoint .pt to load")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--damage-step", type=int, default=120)
-    ap.add_argument("--fr", type=float, default=0.5)     # fixed fire rate for test
+    ap.add_argument("--fr", type=float, default=0.5) # fixed fire rate for test
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--out-root", default=r"C:\Users\sprea\Desktop\pythonProject\GNN_NCA\outputs\graphaug_nca\test_regrowth")
     ap.add_argument("--kinds", default="", help="Comma list of damage kinds; default uses config.damage.kinds keys.")
@@ -111,10 +131,10 @@ def main():
     os.makedirs(save_root, exist_ok=True)
 
     config = load_config("configs/config.json")
-    device     = config["misc"]["device"]
-    n_ch       = int(config["model"]["n_channels"])
-    img_size   = int(config["data"]["img_size"])
-    alpha_thr  = float(config["model"].get("alpha_thr", 0.2))
+    device = config["misc"]["device"]
+    n_ch = int(config["model"]["n_channels"])
+    img_size = int(config["data"]["img_size"])
+    alpha_thr = float(config["model"].get("alpha_thr", 0.2))
 
     # ---- Build model with same knobs as training ----
     gcfg = config.get("graph_augmentation", {})
@@ -135,7 +155,7 @@ def main():
         device=device,
     ).to(device).eval()
 
-    # ---- Load the EXACT checkpoint you passed ----
+    # ---- Load passed checkpoint ----
     ckpt = torch.load(args.ckpt_path, map_location=device)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
     if missing:   print(f"[test] missing keys: {missing}")
