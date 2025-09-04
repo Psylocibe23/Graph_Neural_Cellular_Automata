@@ -1,18 +1,30 @@
-# src/testing/test_intermediate_loss.py
 import os
 import torch
 import matplotlib.pyplot as plt
 import numpy as np
 import torch.nn.functional as F
-
 from utils.nca_init import make_seed
 from modules.nca import NeuralCA
 from utils.config import load_config
 from utils.image import load_single_target_image
 
+"""
+test_intermediate_loss.py — classic NCA growth rollout (frames + quick grid).
+Roll a trained classic NCA (no graph augmentation) from a single seed and
+dump per-step RGBA frames to disk for visual inspection.
+
+What it does
+  - Loads config and a specified checkpoint (edit `ckpt_path`).
+  - Builds NeuralCA with training knobs and seeds a 1-cell embryo at center.
+  - Steps the CA for `steps` iterations using a fixed or random fire-rate.
+  - Saves masked, upscaled frames `frame_###.png`.
+  - Shows a tiny grid of selected steps at the end (for quick sanity check).
+  - Note: despite the filename, this script does not compute loss; it’s a rollout.
+"""
+
 
 def save_img(img, path, upscale=4):
-    """Save RGBA image, upscaled, masking out dead cells (alpha < 0.1)."""
+    """Save RGBA image, upscaled, masking out dead cells."""
     if hasattr(img, "detach"):
         img = img.detach().cpu()
     if img.ndim == 4:
@@ -36,14 +48,14 @@ def save_img(img, path, upscale=4):
 def main():
     # --- SETTINGS ---
     config = load_config('configs/config.json')
-    device      = config["misc"]["device"]
-    n_channels  = config["model"]["n_channels"]
-    img_size    = config["data"]["img_size"]
-    steps       = 400
-    upscale     = 4
+    device = config["misc"]["device"]
+    n_channels = config["model"]["n_channels"]
+    img_size = config["data"]["img_size"]
+    steps = 400
+    upscale = 4
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
-    # Pick your checkpoint here
+    # Pick checkpoint
     ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch625.pt"
     save_dir  = f"outputs/classic_nca/test_growth/{target_name}"
     os.makedirs(save_dir, exist_ok=True)
@@ -51,7 +63,7 @@ def main():
     # Optional: load target for side-by-side checking later (not needed to roll)
     _ = load_single_target_image(config).to(device)
 
-    # --- BUILD MODEL (new signature: no layer_norm) ---
+    # --- BUILD MODEL ---
     model = NeuralCA(
         n_channels=n_channels,
         update_hidden=config["model"]["update_mlp"]["hidden_dim"],
@@ -65,7 +77,7 @@ def main():
     # Load weights (strict=False to be robust across minor changes)
     ckpt = torch.load(ckpt_path, map_location=device)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
-    if missing:   print(f"[test] missing model keys (initialized fresh): {missing}")
+    if missing: print(f"[test] missing model keys (initialized fresh): {missing}")
     if unexpected: print(f"[test] unexpected model keys (ignored): {unexpected}")
     model.eval()
 
@@ -76,7 +88,7 @@ def main():
     state = seed.clone()
     all_imgs = []
 
-    # Fire-rate policy: fixed 0.5 (matches training distribution) or random in [0.5,1.0]
+    # Fire-rate policy
     FR_FIXED  = 0.5
     FR_RANDOM = False
 
