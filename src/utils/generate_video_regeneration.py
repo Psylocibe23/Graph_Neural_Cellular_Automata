@@ -1,16 +1,7 @@
-# src/utils/generate_video_regenration.py
-# Build one video per damage folder from combo_*.png frames.
-# Usage:
-#   PYTHONPATH=src python src/utils/generate_video_regeneration.py
-# Optional env overrides:
-#   GNN_NCA_REGROWTH_ROOT="/path/to/test_regrowth/gecko"
-#   GNN_NCA_VIDEO_FPS=20
-
 import os
 import re
 import sys
 import glob
-
 try:
     import cv2
 except Exception as e:
@@ -20,11 +11,9 @@ except Exception as e:
     )
 
 def _nat_key(s: str):
-    # natural sort: split numbers so combo_2.png < combo_10.png
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 def _default_root():
-    # Try Windows path, then WSL path, then repo-relative fallback
     candidates = [
         r"C:\Users\sprea\Desktop\pythonProject\GNN_NCA\outputs\graphaug_nca\test_regrowth\gecko",
         "/mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/test_regrowth/gecko",
