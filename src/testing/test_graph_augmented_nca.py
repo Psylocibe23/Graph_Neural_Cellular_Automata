@@ -4,13 +4,25 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-
 from utils.config import load_config
 from utils.image import load_single_target_image
 from utils.nca_init import make_seed
-
-# Graph-augmented model
 from modules.ncagraph import NeuralCAGraph
+
+"""
+Run a checkpointed NeuralCAGraph on a single seed and export per-step visual diagnostics.
+
+What it does
+  - Loads config + checkpoint, builds the model in eval mode.
+  - Simulates for STEPS with fixed or random fire_rate from a [1,C,H,W] seed.
+  - Requests the model’s attention map (return_attention=True) and reconstructs the
+    exact mid-range aggregation used that step by saving/restoring Python RNG state
+    so the sampled offsets match.
+  - Saves per-step “combo_###.png” panels: masked RGB, attention heatmap, attention
+    overlaid with sender/receiver masks, and per-group message magnitudes (RGB/alpha/hidden).
+  - Also saves per-offset tiles to visualize directionality/border effects.
+"""
+
 
 
 # ------------------------------------------------------------
@@ -35,7 +47,7 @@ def masked_rgb(x4, alpha_thr=0.1, upscale=1):
     if x4.ndim == 4:
         x4 = x4[0]
     rgb = x4[:3].detach().cpu()
-    a   = x4[3:4].detach().cpu()
+    a = x4[3:4].detach().cpu()
     m = (a > alpha_thr).float()
     rgb = rgb * m
     img = rgb.permute(1, 2, 0).numpy().clip(0, 1)
@@ -48,13 +60,13 @@ def masked_rgb(x4, alpha_thr=0.1, upscale=1):
 
 
 # ------------------------------------------------------------
-# Zero-padded shift (to match the upgraded graph module)
+# Zero-padded shift 
 # ------------------------------------------------------------
 def shift2d(x, dy, dx, zero_pad=True):
     if not zero_pad:
         return torch.roll(x, shifts=(dy, dx), dims=(2, 3))
     B, C, H, W = x.shape
-    top, bot  = max(dy, 0), max(-dy, 0)
+    top, bot = max(dy, 0), max(-dy, 0)
     left, right = max(dx, 0), max(-dx, 0)
     xpad = F.pad(x, (left, right, top, bot), value=0.0)
     return xpad[:, :, bot:bot + H, left:left + W]
@@ -62,11 +74,6 @@ def shift2d(x, dy, dx, zero_pad=True):
 
 # ------------------------------------------------------------
 # Reconstruct the *exact* graph aggregation used this step
-# (same offsets thanks to Python RNG state capture)
-# Returns:
-#   attn_map [H,W], sender_union [H,W], receiver_mask [H,W],
-#   group_maps dict {"rgb":[..], "alpha":[..], "hidden":[..]},
-#   per_offset (list of (dy,dx,map[H,W]))
 # ------------------------------------------------------------
 @torch.no_grad()
 def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
@@ -78,7 +85,7 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     assert B == 1, "This debug visual expects batch=1."
 
     # Pull config from the module
-    kmax    = graph_mod.num_neighbors
+    kmax = graph_mod.num_neighbors
     offsets = graph_mod.offsets
     zero_pad = bool(getattr(graph_mod, "zero_padded_shift", True))
     alive_to_alive = bool(getattr(graph_mod, "alive_to_alive", True))
@@ -93,15 +100,15 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     if alive_to_alive:
         A_send = (F.max_pool2d(x[:, 3:4], 3, 1, 1) > alpha_thr).float()  # [1,1,H,W]
 
-    # Receiver mask (same dilation as in the model)
+    # Receiver mask 
     A_recv = (F.max_pool2d(x[:, 3:4], 3, 1, 1) > alpha_thr).float()  # [1,1,H,W]
 
-    # Sample the same neighbor set (we restore RNG state outside)
+    # Sample the same neighbor set
     k = min(kmax, len(offsets))
     chosen = random.sample(offsets, k) if k > 0 else []
 
     messages = []
-    logits   = []
+    logits = []
     sender_masks = []
 
     for (dy, dx) in chosen:
@@ -111,8 +118,8 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
             src = shift2d(A_send, dy, dx, zero_pad)  # [1,1,H,W]
             M_shift = M_shift * src
             sender_masks.append(src)
-        Kp = K_shift.mean(dim=(2, 3))            # [1,d]
-        logit = (Qp * Kp).sum(dim=1)             # [1]
+        Kp = K_shift.mean(dim=(2, 3))  # [1,d]
+        logit = (Qp * Kp).sum(dim=1)  # [1]
         logits.append(logit)
         messages.append(M_shift)
 
@@ -122,12 +129,12 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
         return hw_zeros.cpu(), hw_zeros.cpu(), A_recv[0, 0].cpu(), \
                {"rgb": hw_zeros.cpu(), "alpha": hw_zeros.cpu(), "hidden": hw_zeros.cpu()}, []
 
-    L = torch.stack(logits, dim=0).squeeze(-1)       # [N]
-    L = L - L.max()                                  # stabilize
-    Wt = F.softmax(L / temperature, dim=0)           # [N]
-    Wt_bc = Wt.view(len(chosen), 1, 1, 1, 1)         # [N,1,1,1,1]
-    M_stack = torch.stack(messages, dim=0)           # [N,1,C,H,W]
-    weighted = M_stack * Wt_bc                       # [N,1,C,H,W]
+    L = torch.stack(logits, dim=0).squeeze(-1)  # [N]
+    L = L - L.max()  # stabilize
+    Wt = F.softmax(L / temperature, dim=0)  # [N]
+    Wt_bc = Wt.view(len(chosen), 1, 1, 1, 1)  # [N,1,1,1,1]
+    M_stack = torch.stack(messages, dim=0) # [N,1,C,H,W]
+    weighted = M_stack * Wt_bc  # [N,1,C,H,W]
 
     # Attention map = mean over channels, sum over offsets
     attn_map = weighted.abs().mean(dim=2).sum(dim=0)[0, :, :]  # [H,W]
@@ -135,7 +142,7 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     # Sender union (alive_to_alive only)
     if alive_to_alive and sender_masks:
         src_stack = torch.stack(sender_masks, dim=0)  # [N,1,1,H,W]
-        sender_union = (src_stack.max(dim=0).values)[0, 0]      # [H,W]
+        sender_union = (src_stack.max(dim=0).values)[0, 0]  # [H,W]
     else:
         sender_union = torch.zeros_like(attn_map)
 
@@ -143,7 +150,7 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
     def ch_mean(slice_):
         return weighted[:, 0, slice_, :, :].abs().mean(dim=1).sum(dim=0)  # [H,W]
 
-    rgb_map   = ch_mean(slice(0, 3)) if C >= 3 else torch.zeros_like(attn_map)
+    rgb_map = ch_mean(slice(0, 3)) if C >= 3 else torch.zeros_like(attn_map)
     alpha_map = ch_mean(slice(3, 4)) if C >= 4 else torch.zeros_like(attn_map)
     hidden_map= ch_mean(slice(4, C)) if C >  4 else torch.zeros_like(attn_map)
 
@@ -164,12 +171,11 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
 def save_main_panel(step, out_dir, rgb_img, attn, sender, receiver, group_maps):
     os.makedirs(out_dir, exist_ok=True)
 
-    # Coerce to numpy
-    attn_np    = to_np(attn)
-    sender_np  = to_np(sender)
+    attn_np = to_np(attn)
+    sender_np = to_np(sender)
     receiver_np= to_np(receiver)
-    rgb_np     = to_np(rgb_img)
-    rgb_map_np   = to_np(group_maps["rgb"])
+    rgb_np = to_np(rgb_img)
+    rgb_map_np = to_np(group_maps["rgb"])
     alpha_map_np = to_np(group_maps["alpha"])
     hidden_map_np= to_np(group_maps["hidden"])
 
@@ -190,11 +196,11 @@ def save_main_panel(step, out_dir, rgb_img, attn, sender, receiver, group_maps):
     ax3.imshow(attn_np, cmap="viridis")
     # sender in magenta, receiver in green
     sender_rgba = np.zeros((*sender_np.shape, 4), dtype=np.float32)
-    sender_rgba[..., 0] = 1.0  # R
+    sender_rgba[..., 0] = 1.0  
     sender_rgba[..., 3] = (sender_np > 0).astype(np.float32) * 0.35
     ax3.imshow(sender_rgba)
     receiver_rgba = np.zeros((*receiver_np.shape, 4), dtype=np.float32)
-    receiver_rgba[..., 1] = 1.0  # G
+    receiver_rgba[..., 1] = 1.0  
     receiver_rgba[..., 3] = (receiver_np > 0).astype(np.float32) * 0.35
     ax3.imshow(receiver_rgba)
     ax3.set_title("Attention + sender (magenta) / receiver (green)")
@@ -247,25 +253,24 @@ def save_offset_tiles(step, out_dir, per_offset):
 
 
 # ------------------------------------------------------------
-# Main: roll the model and dump diagnostics every step
+# Main
 # ------------------------------------------------------------
 def main():
-    # --- settings ---
     config = load_config("configs/config.json")
-    device      = config["misc"]["device"]
-    n_channels  = int(config["model"]["n_channels"])
-    img_size    = int(config["data"]["img_size"])
-    alpha_thr   = float(config["model"].get("alpha_thr", 0.1))
+    device = config["misc"]["device"]
+    n_channels = int(config["model"]["n_channels"])
+    img_size = int(config["data"]["img_size"])
+    alpha_thr = float(config["model"].get("alpha_thr", 0.1))
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
-    # Pick your checkpoint (graphaug run)
+    # Pick checkpoint
     ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch380.pt"
     out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
     os.makedirs(out_dir, exist_ok=True)
 
-    STEPS      = 300       # how many CA steps to roll
-    UPSCALE    = 4         # upscale for the RGB view
-    FR_RANDOM  = False     # use random fire rate like training
+    STEPS      = 300 # how many CA steps to roll
+    UPSCALE    = 4  # upscale for the RGB view
+    FR_RANDOM  = False # use random fire rate like training
     FR_FIXED   = 0.5
 
     # --- build model ---
@@ -276,7 +281,6 @@ def main():
         update_gain=float(config["model"].get("update_gain", 0.1)),
         alpha_thr=alpha_thr,
         use_groupnorm=bool(config["model"].get("use_groupnorm", True)),
-        # graph knobs from config if present
         message_gain=float(config["graph_augmentation"].get("message_gain", 0.5)),
         hidden_only=bool(config["graph_augmentation"].get("hidden_only", True)),
         graph_d_model=int(config["graph_augmentation"].get("d_model", 16)),
@@ -300,7 +304,7 @@ def main():
 
     # Rollout with diagnostics
     for t in range(STEPS + 1):
-        # ---- pre-step visuals will reflect the *next* transition ----
+        # ---- pre-step visuals will reflect the next transition ----
         pre_state = state.clone()
 
         # capture python RNG so graph offsets in debug match the forward call
@@ -319,8 +323,7 @@ def main():
         random.setstate(saved_rng)
         attn_dbg, senders, receivers, group_maps, per_offset = \
             debug_graph_from_state(pre_state, model.graph, alpha_thr=model.alpha_thr)
-
-        # Prefer the attention returned by the model (already normalized).
+        
         rgb_now = masked_rgb(state[:, :4], alpha_thr=alpha_thr, upscale=UPSCALE)
 
         # save panels
