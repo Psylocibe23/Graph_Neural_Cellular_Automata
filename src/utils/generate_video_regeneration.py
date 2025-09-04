@@ -1,7 +1,7 @@
 # src/utils/generate_video_regenration.py
 # Build one video per damage folder from combo_*.png frames.
 # Usage:
-#   PYTHONPATH=src python src/utils/generate_video_regenration.py
+#   PYTHONPATH=src python src/utils/generate_video_regeneration.py
 # Optional env overrides:
 #   GNN_NCA_REGROWTH_ROOT="/path/to/test_regrowth/gecko"
 #   GNN_NCA_VIDEO_FPS=20

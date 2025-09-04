@@ -1,4 +1,11 @@
 # src/testing/test_graph_attention_evolution.py
+
+"""
+PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py   --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch380.pt \
+  --target gecko \
+  --include-clean
+"""
+
 import os, re, glob, math, random, argparse, json, sys
 import numpy as np
 import torch, torch.nn.functional as F
