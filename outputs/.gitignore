@@ -1,0 +1,5 @@
+# Ignore everything under outputs/
+*
+# …but keep any .gitignore and any .gitkeep anywhere in this subtree
+!.gitignore
+!**/.gitkeep
