@@ -8,7 +8,7 @@ class NeuralCA(nn.Module):
     """
     Neural Cellular Automata with:
       - Fixed Sobel+identity perception (depthwise, frozen)
-      - Two 1x1 convs (Distill-style), last conv zero-initialized
+      - Two 1x1 convs, last conv zero-initialized
       - GroupNorm on dx (robust on sparse canvases / small batches)
       - Bounded update via tanh(dx) * update_gain
       - Pre-update gating (who is allowed to update)
@@ -20,8 +20,8 @@ class NeuralCA(nn.Module):
         n_channels: int,
         update_hidden: int = 128,
         img_size: int = 40,
-        update_gain: float = 0.1,     # small step size keeps dynamics smooth
-        alpha_thr: float = 0.1,       # alive threshold for masks
+        update_gain: float = 0.1,  # small step size keeps dynamics smooth
+        alpha_thr: float = 0.1,  # alive threshold for masks
         use_groupnorm: bool = True,
         device: str = "cpu",
     ):
@@ -42,11 +42,11 @@ class NeuralCA(nn.Module):
             nn.ReLU(inplace=False),  
             nn.Conv2d(update_hidden, n_channels, kernel_size=1, bias=False),
         )
-        # Zero-init the last conv for gentle starts (pairs well with bounded updates)
+        # Zero-init the last conv for gentle starts
         nn.init.zeros_(self.update_net[-1].weight)
 
         # Normalize the UPDATE field (dx), not the state x.
-        # GroupNorm(1, C) ~ LayerNorm over channels, but more numerically stable here.
+        # GroupNorm(1, C) ~ LayerNorm over channels
         self.norm = (
             nn.GroupNorm(1, n_channels, eps=1e-3, affine=True)
             if use_groupnorm else nn.Identity()
@@ -56,7 +56,7 @@ class NeuralCA(nn.Module):
     def _alive_mask(self, x: torch.Tensor) -> torch.Tensor:
         """
         Alive mask from ALPHA channel, dilated by 3x3 max-pool.
-        Returns [B,1,H,W] in {0,1}. No gradients needed through the mask.
+        Returns [B,1,H,W] in {0,1}. 
         """
         alpha = x[:, 3:4]  # single channel (alpha)
         m = (F.max_pool2d(alpha, kernel_size=3, stride=1, padding=1) > self.alpha_thr).float()
@@ -83,19 +83,17 @@ class NeuralCA(nn.Module):
             fire_mask = (torch.rand(x.shape[0], 1, x.shape[2], x.shape[3], device=x.device) <= fire_rate).float()
             dx = dx * fire_mask
 
-        # 4) Pre-update gating: only allow updates where current state is "alive"
+        # 4) Pre-update gating: only allow updates where current state is alive
         pre_alive = self._alive_mask(x)  # [B,1,H,W]
         dx = dx * pre_alive
 
-        # 5) Normalize update, bound step size, and apply (out-of-place add)
+        # 5) Normalize update, bound step size, and apply 
         dx = self.norm(dx)
         dx = torch.tanh(dx) * self.update_gain
         x = x + dx
 
-        # 6) Post-update gating ONLY on alpha (no in-place slicing)
+        # 6) Post-update gating ONLY on alpha 
         post_alive = self._alive_mask(x)  # [B,1,H,W]
-        # Build a channel-wise gate without in-place writes:
-        #   gate = [1,1,1, post_alive, 1,1,1,...]
         if self.n_channels > 4:
             ones_pre  = torch.ones_like(x[:, :3])
             ones_post = torch.ones_like(x[:, 4:])
@@ -103,6 +101,6 @@ class NeuralCA(nn.Module):
         else:
             ones_pre = torch.ones_like(x[:, :3])
             gate = torch.cat([ones_pre, post_alive], dim=1)
-        x = x * gate  # out-of-place multiply; safe for autograd
+        x = x * gate 
 
         return x
