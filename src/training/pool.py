@@ -26,7 +26,7 @@ class SamplePool:
             batch (torch.Tensor): [B,C,H,W] batch of NCA states
         """
         idx = random.sample(range(len(self.pool)), batch_size)
-        # Always clone so original pool isn't modified directly
+        # Clone so original pool isn't modified directly
         batch = torch.stack([self.pool[i].clone() for i in idx])
         return idx, batch
 
