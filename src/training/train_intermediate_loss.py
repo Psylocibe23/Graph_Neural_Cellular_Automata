@@ -6,7 +6,6 @@ import json
 import time
 import random
 from datetime import datetime
-
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -15,7 +14,6 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import trange
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.metrics import structural_similarity as ssim
-
 from utils.config import load_config
 from utils.image import load_single_target_image
 from training.pool import SamplePool
@@ -23,9 +21,16 @@ from modules.nca import NeuralCA
 from utils.visualize import save_comparison
 from utils.utility_functions import count_parameters
 
-# Uncomment while debugging to pinpoint any autograd issue
-# torch.autograd.set_detect_anomaly(True)
-
+"""
+Classic Neural CA trainer (no graph).
+Reads hyperparameters from configs/config.json, builds a NeuralCA, and trains it
+with a TARGET-masked MSE + tiny alpha-area penalty. Uses a SamplePool with
+mixed-length rollouts (short/long) and per-step randomized fire-rate. Includes a
+stability phase (extra K steps for near-target states to penalize drift),
+periodic worst-sample resets and random reseeding. Logs to TensorBoard, saves
+comparison images, computes pixel-perfection/SSIM/PSNR, checkpoints with auto-
+resume, and writes a per-epoch JSON/JSONL summary at the end.
+"""
 
 # -----------------------------------------------------------------------------
 # Masked loss: supervise where TARGET is alive; add tiny area penalty
@@ -123,8 +128,8 @@ def main():
         n_channels=n_channels,
         update_hidden=config["model"]["update_mlp"]["hidden_dim"],
         img_size=img_size,
-        update_gain=0.1,            # small step size 0.05–0.2
-        alpha_thr=0.1,              # alive threshold in the CA dynamics
+        update_gain=0.1,            
+        alpha_thr=0.1,           
         use_groupnorm=True,
         device=device
     ).to(device)
@@ -137,7 +142,7 @@ def main():
         weight_decay=config["training"]["weight_decay"]
     )
 
-    # (Optional) LR scheduler (controlled via config)
+    # LR scheduler (controlled via config)
     scheduler_cfg = config["training"].get("scheduler")
     scheduler = None
     if isinstance(scheduler_cfg, dict):
@@ -161,17 +166,17 @@ def main():
     total_epochs = config["training"]["num_epochs"]
     steps_per_epoch = config["training"]["steps_per_epoch"]
     batch_size = config["training"]["batch_size"]
-    short_min = config["training"]["nca_steps_min"]   # 48
-    short_max = config["training"]["nca_steps_max"]   # 80
-    long_prob = 0.25                                   # 25% long rollouts
-    long_min, long_max = 200, 400                      # long horizons
+    short_min = config["training"]["nca_steps_min"]   
+    short_max = config["training"]["nca_steps_max"]   
+    long_prob = 0.25                                  
+    long_min, long_max = 200, 400                      
     log_interval = config["logging"]["log_interval"]
     visualize_interval = config["logging"]["visualize_interval"]
     ckpt_interval = config["logging"].get("checkpoint_interval_epochs", 25)
 
     # Reset policy (applied AFTER backward/step)
-    reset_worst_prob = 0.10    # reset top-10% losses in batch
-    random_reseed_prob = 0.05  # plus small random reseed to maintain age diversity
+    reset_worst_prob = 0.10 
+    random_reseed_prob = 0.05  
 
     # Metrics storage
     epoch_losses, pixel_scores, ssim_scores, psnr_scores = [], [], [], []
@@ -187,18 +192,18 @@ def main():
         last_ckpt = ckpt_files[-1]
         checkpoint = torch.load(last_ckpt, map_location=device)
     
-        # 1) Model: allow missing (new GN) / unexpected keys (name changes)
+        # 1) Model
         missing, unexpected = model.load_state_dict(checkpoint["model_state"], strict=False)
         if missing:   print(f"[resume] missing keys (initialized fresh): {missing}")
         if unexpected:print(f"[resume] unexpected keys (ignored): {unexpected}")
     
-        # 2) Optimizer: try to load, else re-init fresh
+        # 2) Optimizer
         try:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
         except Exception as e:
             print(f"[warn] optimizer state not compatible, reinitializing: {e}")
     
-        # 3) Scheduler: only if present & compatible
+        # 3) Scheduler
         if scheduler is not None and checkpoint.get("scheduler_state") is not None:
             try:
                 scheduler.load_state_dict(checkpoint["scheduler_state"])
@@ -227,15 +232,6 @@ def main():
             # Sample batch from pool
             idx, batch = pool.sample(batch_size)
             state = batch.to(device)
-
-            # Damage training (optional) — currently commented
-            # if torch.rand(1) < 0.30:
-            #     s = config["training"]["damage_patch_size"]  # e.g., 10
-            #     y0 = torch.randint(0, img_size - s + 1, (1,), device=device).item()
-            #     x0 = torch.randint(0, img_size - s + 1, (1,), device=device).item()
-            #     state[:, :, y0:y0 + s, x0:x0 + s] = 0.0
-
-            # Choose rollout regime (short vs long)
             if random.random() < long_prob:
                 steps_lo, steps_hi = long_min, long_max
             else:
@@ -260,7 +256,7 @@ def main():
 
             # Stability phase: for samples already near target, roll extra K steps & penalize drift
             with torch.no_grad():
-                close_mask = (per_sample < 0.01)  # tune threshold
+                close_mask = (per_sample < 0.01) 
 
             if close_mask.any():
                 state_stab = state.clone()
@@ -269,9 +265,8 @@ def main():
                     fr = float(torch.empty(1, device=device).uniform_(0.5, 1.0).item())
                     state_stab[close_mask] = model(state_stab[close_mask], fire_rate=fr)
                 stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
-                loss = loss + 0.5 * stab  # weight 0.3–1.0
+                loss = loss + 0.5 * stab  
 
-            # Decide which indices to reset/reseed, but DO NOT modify `state` yet
             n_reset = int(reset_worst_prob * batch_size)
             worst_indices = None
             if n_reset > 0:
@@ -301,7 +296,7 @@ def main():
             # Return updated states to pool (detached)
             pool.replace(idx, state_for_pool)
 
-            # --- Logging / metrics (computed on the *pre-reset* state) ---
+            # --- Logging ---
             pred = state[:, :4]
             pred_img = pred[0].detach().cpu().numpy()
             target_img = target.cpu().numpy()
