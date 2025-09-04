@@ -2,12 +2,19 @@ agnn_env/
 __pycache__/
 *.pyc
 
-# Ignore contents, but keep .gitkeep files anywhere inside
+# ignore all outputs by default
 outputs/*
 !outputs/**/.gitkeep
+!outputs/.gitignore
 
+# ignore data by default
 data/*
 !data/**/.gitkeep
+
 .env
 .ipynb_checkpoints
+
+# ignore model binaries by default...
 *.pt
+# ...but allow curated checkpoints
+!outputs/**/checkpoints/*.pt

@@ -1,5 +1,5 @@
-# Ignore everything under outputs/
+# outputs/.gitignore
 *
-# …but keep any .gitignore and any .gitkeep anywhere in this subtree
 !.gitignore
 !**/.gitkeep
+!**/checkpoints/*.pt
