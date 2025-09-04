@@ -7,15 +7,27 @@ import torch.nn.functional as F
 
 class GraphAugmentation(nn.Module):
     """
-    Mid-range, gated message passing used by NeuralCAGraph.
+    GraphAugmentation — mid-range attention message passing for NeuralCAGraph.
 
-    Computes per-pixel messages by aggregating features from a sparse set of
-    mid-range offsets using attention weights. Optional upgrades:
-      • alive_to_alive: only 'alive' (alpha-dilated) source cells send messages
-      • zero_padded_shift: use zero-padded shifts instead of torch.roll to avoid wrap
+    What it does
+      - Per step, sample k mid-range offsets, shift Key/Message features,
+        score each offset via softmax over pooled (Q·K), and sum the
+        weighted, shifted messages into an aggregated message.
+      - Optional “alive→alive”: only alpha-alive senders contribute.
+      - Optional zero-padded shifts (no wrap) instead of torch.roll.
 
-    Returns either just the aggregated message, or (message, attention_map) when
-    return_attention_map=True (useful for visualization).
+    I/O
+      - Input : x: [B,C,H,W]
+      - Output: agg_message: [B,C,H,W]
+                attn_map: [B,H,W] (if return_attention_map=True)
+
+    Key knobs
+      d_model, attention_radius, num_neighbors, alive_to_alive,
+      zero_padded_shift, alpha_thr.
+
+    Notes
+      - NeuralCAGraph injects tanh(agg_message) * message_gain (optionally
+        hidden-only) into its local update before normalization/bounding.
     """
 
     def __init__(
@@ -41,8 +53,8 @@ class GraphAugmentation(nn.Module):
 
         # 1x1 projections
         self.query_proj = nn.Conv2d(n_channels, d_model, 1)
-        self.key_proj   = nn.Conv2d(n_channels, d_model, 1)
-        self.msg_proj   = nn.Conv2d(n_channels, n_channels, 1)  # messages keep all channels
+        self.key_proj = nn.Conv2d(n_channels, d_model, 1)
+        self.msg_proj = nn.Conv2d(n_channels, n_channels, 1)  # messages keep all channels
 
         # Learnable temperature (denominator) for logits; init ~ sqrt(d_model)
         self.scaling = nn.Parameter(torch.tensor(math.sqrt(d_model), dtype=torch.float32))
@@ -95,8 +107,8 @@ class GraphAugmentation(nn.Module):
 
         # Projections
         Q = self.query_proj(x)  # [B, d, H, W]
-        K = self.key_proj(x)    # [B, d, H, W]
-        M = self.msg_proj(x)    # [B, C, H, W]
+        K = self.key_proj(x)  # [B, d, H, W]
+        M = self.msg_proj(x)  # [B, C, H, W]
 
         # Spatially pooled descriptors (global summaries)
         Q_pooled = Q.mean(dim=(2, 3))  # [B, d]
@@ -109,7 +121,7 @@ class GraphAugmentation(nn.Module):
         chosen = random.sample(self.offsets, k) if k > 0 else []
 
         messages = []
-        logits   = []
+        logits = []
 
         for (dy, dx) in chosen:
             K_shift = self._shift(K, dy, dx)  # [B, d, H, W]
@@ -121,8 +133,8 @@ class GraphAugmentation(nn.Module):
                 M_shift = M_shift * src
 
             # Logit uses pooled descriptors
-            Kp = K_shift.mean(dim=(2, 3))            # [B, d]
-            logit = (Q_pooled * Kp).sum(dim=1)       # [B]
+            Kp = K_shift.mean(dim=(2, 3))  # [B, d]
+            logit = (Q_pooled * Kp).sum(dim=1)  # [B]
             logits.append(logit)
             messages.append(M_shift)
 
@@ -135,15 +147,15 @@ class GraphAugmentation(nn.Module):
             return agg_message
 
         # Stack and softmax over offsets (numerically stable)
-        L = torch.stack(logits, dim=0)                      # [N, B]
-        L = L - L.max(dim=0, keepdim=True).values           # subtract max per batch item
-        denom = self.scaling.abs() + 1e-6                   # positive temperature
-        Wt = F.softmax(L / denom, dim=0)                    # [N, B]
-        Wt = Wt.view(len(chosen), B, 1, 1, 1)               # broadcast to [N,B,1,1,1]
+        L = torch.stack(logits, dim=0)  # [N, B]
+        L = L - L.max(dim=0, keepdim=True).values  # subtract max per batch item
+        denom = self.scaling.abs() + 1e-6  # positive temperature
+        Wt = F.softmax(L / denom, dim=0)  # [N, B]
+        Wt = Wt.view(len(chosen), B, 1, 1, 1)  # broadcast to [N,B,1,1,1]
 
-        M_stack = torch.stack(messages, dim=0)              # [N, B, C, H, W]
-        weighted = M_stack * Wt                              # [N, B, C, H, W]
-        agg_message = weighted.sum(dim=0)                   # [B, C, H, W]
+        M_stack = torch.stack(messages, dim=0)  # [N, B, C, H, W]
+        weighted = M_stack * Wt  # [N, B, C, H, W]
+        agg_message = weighted.sum(dim=0)  # [B, C, H, W]
 
         if return_attention_map:
             # Channel-averaged magnitude of weighted contributions, summed over offsets
