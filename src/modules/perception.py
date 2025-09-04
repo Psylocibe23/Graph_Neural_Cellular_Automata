@@ -19,7 +19,7 @@ class FixedSobelPerception(nn.Module):
         self.conv.weight.requires_grad_(False)
 
     def forward(self, x):
-        y = self.conv(x)
+        y = self.conv(x) 
         # [B, C*3, H, W] -> [B, 3, C, H, W] -> [B, 3*C, H, W]
         B, C3, H, W = y.shape
         y = y.view(B, -1, 3, H, W).permute(0,2,1,3,4).reshape(B, -1, H, W)
