@@ -6,14 +6,6 @@ import torch
 def save_comparison(target, pred, epoch, out_dir, filename=None, upscale=4):
     """
     Save a side-by-side comparison: target RGBA and predicted RGBA, optionally upscaled.
-
-    Args:
-        target: [4, H, W] or [B, 4, H, W] (torch.Tensor or numpy)
-        pred:   [4, H, W] or [B, 4, H, W] (torch.Tensor or numpy)
-        epoch:  int, current epoch
-        out_dir: directory to save image
-        filename: custom name (optional)
-        upscale: int, how much to scale for visualization (default: 4)
     """
     if hasattr(target, "detach"):
         target = target.detach().cpu()
