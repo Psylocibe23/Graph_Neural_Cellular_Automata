@@ -56,17 +56,12 @@ def make_video_growth_only(growth_dir, out_path, fps=12):
 
 
 
-
-    
-
 if __name__ == "__main__":
-    # Adjust these paths as needed
     #base_dir = "outputs/graph_augmented/growth_video/gecko_graphaug"
     #growth_dir = base_dir
     #attn_dir = os.path.join(base_dir, "attention")
     #out_path = os.path.join(base_dir, "side_by_side.mp4")
     #make_video(growth_dir, attn_dir, out_path, fps=12)
-
     base_dir = "outputs/graphaug_nca/test_attention/gecko"
     out_path = os.path.join(base_dir, "growth_video.mp4")
     make_video_growth_only(base_dir, out_path, fps=12)
