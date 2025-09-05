@@ -248,9 +248,6 @@ def main():
     
         start_epoch = int(resume_payload.get("epoch", 0)) + 1
         print(f"Resuming from {resume_path} (epoch {start_epoch-1})", flush=True)
-        for g in optimizer.param_groups:
-            g['lr'] = g['lr'] * 0.5  # gentle ramp after objective change
-        print(f"[info] temporarily halved LR to {optimizer.param_groups[0]['lr']:.6g}")
 
     else:
         start_epoch = 1

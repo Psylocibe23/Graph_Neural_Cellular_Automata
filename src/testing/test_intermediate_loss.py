@@ -56,7 +56,7 @@ def main():
     target_name = os.path.splitext(config["data"]["active_target"])[0]
 
     # Pick checkpoint
-    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch625.pt"
+    ckpt_path = f"outputs/classic_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch760.pt"
     save_dir  = f"outputs/classic_nca/test_growth/{target_name}"
     os.makedirs(save_dir, exist_ok=True)
 

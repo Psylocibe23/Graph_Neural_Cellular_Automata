@@ -37,7 +37,7 @@ def make_video(growth_dir, attn_dir, out_path, fps=12):
 
 def make_video_growth_only(growth_dir, out_path, fps=12):
     # Get sorted frame list
-    growth_frames = natsorted(glob.glob(os.path.join(growth_dir, 'combo_*.png')))
+    growth_frames = natsorted(glob.glob(os.path.join(growth_dir, 'combo*.png')))
     num_frames = len(growth_frames)
     assert num_frames > 0, "No frames found!"
     img_g = cv2.imread(growth_frames[0])
@@ -57,6 +57,8 @@ def make_video_growth_only(growth_dir, out_path, fps=12):
 
 
 if __name__ == "__main__":
+    #base_dir = "outputs/classic_nca/test_growth/gecko"
+    #out_path= os.path.join(base_dir, "video_growth.mp4")
     #base_dir = "outputs/graph_augmented/growth_video/gecko_graphaug"
     #growth_dir = base_dir
     #attn_dir = os.path.join(base_dir, "attention")
@@ -64,4 +66,4 @@ if __name__ == "__main__":
     #make_video(growth_dir, attn_dir, out_path, fps=12)
     base_dir = "outputs/graphaug_nca/test_attention/gecko"
     out_path = os.path.join(base_dir, "growth_video.mp4")
-    make_video_growth_only(base_dir, out_path, fps=12)
+    make_video_growth_only(base_dir, out_path, fps=20)
