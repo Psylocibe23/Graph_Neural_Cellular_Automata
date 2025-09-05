@@ -29,6 +29,14 @@ perfection/SSIM/PSNR, checkpoints with robust auto-resume and SIGTERM-safe
 “last” saves, and writes per-epoch JSON/JSONL summaries.
 """
 
+"""
+Trainer for Graph-Augmented NCA (Distill-style objective).
+- Uses full-canvas MSE on premultiplied RGBA (no background penalties).
+- Random short/long rollouts, stochastic fire-rate, and sparse graph messages.
+- Curriculum damage before rollouts; per-param grad-norm normalization.
+- TensorBoard + image dumps; robust resume and checkpointing.
+"""
+
 # ------------------------- Loss (with background penalties) ------------------
 def masked_loss(pred, target, alpha_thr=0.2,
                 lam_area=5e-5, lam_bg_alpha=1e-3, lam_bg_rgb=2e-4):
@@ -50,6 +58,18 @@ def masked_loss(pred, target, alpha_thr=0.2,
     area_pen = lam_area * pred[:, 3:4].mean(dim=(1, 2, 3))
 
     return primary + bg_alpha_pen + bg_rgb_pen + area_pen
+
+
+def loss_premult_rgba(pred, target):
+    """
+    Full-canvas MSE on premultiplied RGBA (Distill paper).
+    pred, target: [B,4,H,W] in [0,1]. RGB should be premultiplied by alpha.
+    Returns per-sample loss [B].
+    """
+    # re-premultiply pred defensively (target will be premultiplied below)
+    pred_rgb_prem = pred[:, :3] * pred[:, 3:4]
+    pred_rgba = torch.cat([pred_rgb_prem, pred[:, 3:4]], dim=1)
+    return F.mse_loss(pred_rgba, target, reduction="none").mean(dim=(1, 2, 3))
 
 
 def save_grid_as_image(grid, filename):
@@ -89,6 +109,7 @@ def main():
 
     # ---- Data ----
     target = load_single_target_image(config).to(device)  # [4,H,W]
+    target[:3] = target[:3] * target[3:4]
     img_size = int(config["data"]["img_size"])
     n_ch = int(config["model"]["n_channels"])
 
@@ -227,6 +248,10 @@ def main():
     
         start_epoch = int(resume_payload.get("epoch", 0)) + 1
         print(f"Resuming from {resume_path} (epoch {start_epoch-1})", flush=True)
+        for g in optimizer.param_groups:
+            g['lr'] = g['lr'] * 0.5  # gentle ramp after objective change
+        print(f"[info] temporarily halved LR to {optimizer.param_groups[0]['lr']:.6g}")
+
     else:
         start_epoch = 1
         print("Starting training from scratch.", flush=True)
@@ -314,7 +339,7 @@ def main():
                     model.message_gain = base_gain_epoch
 
                 # --- Loss ---
-                target_expand = target.unsqueeze(0).expand_as(state[:, :4])
+                """target_expand = target.unsqueeze(0).expand_as(state[:, :4])
                 per_sample = masked_loss(
                     state[:, :4], target_expand,
                     alpha_thr=loss_alpha_thr,
@@ -322,10 +347,14 @@ def main():
                     lam_bg_alpha=loss_lam_bg_alpha,
                     lam_bg_rgb=loss_lam_bg_rgb
                 )
+                loss = per_sample.mean()"""
+                # Loss
+                target_expand = target.unsqueeze(0).expand_as(state[:, :4])
+                per_sample = loss_premult_rgba(state[:, :4], target_expand)
                 loss = per_sample.mean()
 
                 # --- Stability phase ---
-                if stab_enabled:
+                """if stab_enabled:
                     with torch.no_grad():
                         close_mask = (per_sample < stab_thresh)
                     if close_mask.any():
@@ -343,12 +372,21 @@ def main():
                         if hasattr(model, "message_gain"):
                             model.message_gain = base_gain_epoch
                         stab = F.mse_loss(state_stab[close_mask, :4], target_expand[close_mask])
-                        loss = loss + stab_weight * stab
+                        loss = loss + stab_weight * stab"""
 
                 # --- Optimize ---
-                optimizer.zero_grad(set_to_none=True)
+                """optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                optimizer.step()"""
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+
+                # Distill notebook trick: normalize each param's grad by its L2 norm
+                for p in model.parameters():
+                    if p.grad is not None:
+                        p.grad.data.div_(p.grad.data.norm().add_(1e-8))
+
                 optimizer.step()
 
                 # --- Pool replace ---
@@ -368,7 +406,7 @@ def main():
                 pool.replace(idx, state_for_pool)
 
                 # --- Metrics ---
-                pred = state[:, :4]
+                """pred = state[:, :4]
                 pred_img = pred[0].detach().cpu().numpy()
                 target_img = target.cpu().numpy()
                 diff = np.abs(pred_img[:4] - target_img[:4])
@@ -378,7 +416,26 @@ def main():
                 pred_np = pred[0, :3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
                 target_np = target[:3].permute(1, 2, 0).detach().cpu().numpy().clip(0, 1)
                 epoch_ssim.append(ssim(pred_np, target_np, data_range=1.0, channel_axis=-1))
-                epoch_psnr.append(psnr(pred_np, target_np, data_range=1.0))
+                epoch_psnr.append(psnr(pred_np, target_np, data_range=1.0))"""
+                pred = state[:, :4]
+
+                # Premultiply both for fair comparison
+                pred_rgba = torch.cat([pred[:, :3] * pred[:, 3:4], pred[:, 3:4]], dim=1)
+                tgt_rgba  = target.unsqueeze(0).expand_as(pred)
+
+                # Pixel-perfect on premultiplied RGBA
+                pred_np_rgba = pred_rgba[0].detach().cpu().numpy()
+                tgt_np_rgba  = tgt_rgba[0].detach().cpu().numpy()
+                diff = np.abs(pred_np_rgba - tgt_np_rgba)
+                pixel_perfect = (diff < 0.05).all(axis=0).mean()
+                epoch_pixel.append(float(pixel_perfect))
+
+                # SSIM/PSNR on premultiplied RGB
+                pred_np_rgb_prem = (pred_np_rgba[:3]).transpose(1, 2, 0).clip(0, 1)
+                tgt_np_rgb_prem  = (tgt_np_rgba[:3]).transpose(1, 2, 0).clip(0, 1)
+                epoch_ssim.append(ssim(pred_np_rgb_prem, tgt_np_rgb_prem, data_range=1.0, channel_axis=-1))
+                epoch_psnr.append(psnr(pred_np_rgb_prem,  tgt_np_rgb_prem,  data_range=1.0))
+
 
                 avg_loss += loss.item()
 
