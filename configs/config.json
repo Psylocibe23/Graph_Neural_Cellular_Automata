@@ -39,6 +39,7 @@
     "long_rollout_steps_max": 400,  
     "fire_rate_min": 0.5,  
     "fire_rate_max": 0.9,  
+    "resume_epoch_exact": 100,
 
     "num_epochs": 1000,
     "learning_rate": 0.0002,

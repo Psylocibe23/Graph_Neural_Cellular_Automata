@@ -26,7 +26,7 @@ What it does
 
 Example
   PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py 
-    --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch560.pt 
+    --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch660.pt 
     --target gecko --include-clean
 """
 
