@@ -1,5 +1,0 @@
-# outputs/.gitignore
-*
-!.gitignore
-!**/.gitkeep
-!**/checkpoints/*.pt
