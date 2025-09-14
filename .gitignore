@@ -1,20 +1,25 @@
 agnn_env/
 __pycache__/
 *.pyc
-
-# ignore all outputs by default
-outputs/*
-!outputs/**/.gitkeep
-!outputs/.gitignore
-
-# ignore data by default
-data/*
-!data/**/.gitkeep
-
 .env
 .ipynb_checkpoints
 
-# ignore model binaries by default...
+outputs/**
+!outputs/**/
+!outputs/.gitignore
+!outputs/**/.gitkeep
+
+!outputs/**/checkpoints/
+!outputs/**/checkpoints/*.pt
+
+!outputs/**/test_regrowth/**/
+!outputs/**/test_regrowth/**/combo.mp4
+!outputs/**/test_regrowth/**/attention.mp4
+
+data/**
+!data/**/
+!data/.gitignore
+!data/**/.gitkeep
+
 *.pt
-# ...but allow curated checkpoints
 !outputs/**/checkpoints/*.pt
