@@ -3,24 +3,12 @@ import torch
 import torch.nn.functional as F
 
 """
-utils.damage — in-place damage operators + config-driven policy for NCA training/tests.
+utils.damage 
   - cutout_square_, cutout_circle_, stripe_wipe_ → hard deletions (all channels = 0)
   - alpha_dropout_, salt_pepper_alpha_  → alpha-only deletions (shape-aware/agnostic)
   - hidden_scramble_ → noise on hidden channels only (keeps alpha)
   - gaussian_hole_ → soft radial “burn” (multiplicative damp)
   - apply_damage_policy_ → reads a dict config and applies ONE sampled damage kind to the whole batch, in-place.
-
-Config keys (with back-compat fallbacks)
-  start_epoch / damage_start_epoch: begin applying damage after this epoch
-  prob / damage_prob: chance to apply any damage on a given call
-  kinds: dict of {name: weight} to sample damage type
-  size_min / size_max / damage_patch_size : size range (pixels) for geometric damages
-  stripe_width: band width for stripe_wipe_
-  alpha_thr: alive threshold for alpha-conditioned ops
-  alpha_dropout_p: drop probability in alpha_dropout_
-  salt_pepper_p: per-pixel zeroing prob for salt_pepper_alpha_
-  hidden_noise_sigma: std for hidden_scramble_
-  gaussian_softness: edge softness for gaussian_hole_
 """
 
 

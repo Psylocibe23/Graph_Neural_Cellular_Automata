@@ -15,8 +15,8 @@ def _nat_key(s: str):
 
 def _default_root():
     candidates = [
-        r"C:\Users\sprea\Desktop\pythonProject\GNN_NCA\outputs\graphaug_nca\test_regrowth\gecko",
-        "/mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/test_regrowth/gecko",
+        r"C:\Users\...\GNN_NCA\outputs\graphaug_nca\test_regrowth\gecko",  # Ajust path according to project location
+        "/mnt/c/Users/.../GNN_NCA/outputs/graphaug_nca/test_regrowth/gecko",  # Ajust path according to project location
         os.path.abspath(os.path.join(os.path.dirname(__file__),
             "..", "..", "outputs", "graphaug_nca", "test_regrowth", "gecko")),
     ]

@@ -17,27 +17,16 @@ from utils.visualize import save_comparison
 from modules.ncagraph import NeuralCAGraph
 from utils.damage import apply_damage_policy_  # <— NEW: unified damage policy
 
-"""
-Trainer for Graph-Augmented NCA.
-Reads configs/config.json, builds NeuralCAGraph, and optimizes a TARGET-masked
-loss with background penalties (alpha area + BG alpha/RGB). Uses a SamplePool,
-mixed short/long rollouts, stochastic fire-rate, and temporally-sparse graph
-messages (message_rate/message_every) with a light message_gain warm-up.
-Applies curriculum damage before rollouts and a stability phase (extra K steps)
-for near-target states to penalize drift. Logs TB scalars/images + pixel-
-perfection/SSIM/PSNR, checkpoints with robust auto-resume and SIGTERM-safe
-“last” saves, and writes per-epoch JSON/JSONL summaries.
-"""
 
 """
-Trainer for Graph-Augmented NCA (Distill-style objective).
+Trainer for Graph-Augmented NCA.
 - Uses full-canvas MSE on premultiplied RGBA (no background penalties).
 - Random short/long rollouts, stochastic fire-rate, and sparse graph messages.
 - Curriculum damage before rollouts; per-param grad-norm normalization.
 - TensorBoard + image dumps; robust resume and checkpointing.
 """
 
-# ------------------------- Loss (with background penalties) ------------------
+# ------------------------- Loss (with background penalties) Non used here ------------------
 def masked_loss(pred, target, alpha_thr=0.2,
                 lam_area=5e-5, lam_bg_alpha=1e-3, lam_bg_rgb=2e-4):
     """
@@ -62,11 +51,11 @@ def masked_loss(pred, target, alpha_thr=0.2,
 
 def loss_premult_rgba(pred, target):
     """
-    Full-canvas MSE on premultiplied RGBA (Distill paper).
+    Full-canvas MSE on premultiplied RGBA.
     pred, target: [B,4,H,W] in [0,1]. RGB should be premultiplied by alpha.
     Returns per-sample loss [B].
     """
-    # re-premultiply pred defensively (target will be premultiplied below)
+    # re-premultiply pred defensively 
     pred_rgb_prem = pred[:, :3] * pred[:, 3:4]
     pred_rgba = torch.cat([pred_rgb_prem, pred[:, 3:4]], dim=1)
     return F.mse_loss(pred_rgba, target, reduction="none").mean(dim=(1, 2, 3))
@@ -222,7 +211,6 @@ def main():
             try:
                 payload = torch.load(p, map_location="cpu")
                 ep = int(payload.get("epoch", -1))
-                # global_step may be missing in older files; fall back to ep
                 gs = int(payload.get("global_step", ep))
                 if ep > best_epoch or (ep == best_epoch and gs > best_step):
                     best_epoch, best_step = ep, gs
@@ -418,18 +406,18 @@ def main():
 
                 # Premultiply both for fair comparison
                 pred_rgba = torch.cat([pred[:, :3] * pred[:, 3:4], pred[:, 3:4]], dim=1)
-                tgt_rgba  = target.unsqueeze(0).expand_as(pred)
+                tgt_rgba = target.unsqueeze(0).expand_as(pred)
 
                 # Pixel-perfect on premultiplied RGBA
                 pred_np_rgba = pred_rgba[0].detach().cpu().numpy()
-                tgt_np_rgba  = tgt_rgba[0].detach().cpu().numpy()
+                tgt_np_rgba = tgt_rgba[0].detach().cpu().numpy()
                 diff = np.abs(pred_np_rgba - tgt_np_rgba)
                 pixel_perfect = (diff < 0.05).all(axis=0).mean()
                 epoch_pixel.append(float(pixel_perfect))
 
                 # SSIM/PSNR on premultiplied RGB
                 pred_np_rgb_prem = (pred_np_rgba[:3]).transpose(1, 2, 0).clip(0, 1)
-                tgt_np_rgb_prem  = (tgt_np_rgba[:3]).transpose(1, 2, 0).clip(0, 1)
+                tgt_np_rgb_prem = (tgt_np_rgba[:3]).transpose(1, 2, 0).clip(0, 1)
                 epoch_ssim.append(ssim(pred_np_rgb_prem, tgt_np_rgb_prem, data_range=1.0, channel_axis=-1))
                 epoch_psnr.append(psnr(pred_np_rgb_prem,  tgt_np_rgb_prem,  data_range=1.0))
 
@@ -547,7 +535,7 @@ def main():
     except Exception as e:
         print(f"[warn] could not save final checkpoint: {e}")
 
-    # -------------------- Summary JSON (with epoch suffix) ---------------------------------
+    # -------------------- Summary JSON ---------------------------------
     log_summary = {
         "training_time_minutes": (time.time() - start_wall) / 60.0,
         "config": config,

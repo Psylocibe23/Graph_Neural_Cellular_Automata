@@ -12,16 +12,15 @@ class NeuralCAGraph(nn.Module):
     Neural Cellular Automata with graph-gated mid-range message passing.
 
     Components
-        - FixedSobelPerception: frozen depthwise identity+Sobel features → [B,3C,H,W]
+        - FixedSobelPerception: frozen depthwise identity+Sobel features
         - Update MLP (1×1 → ReLU → 1×1, last layer zero-init) produces dx_local
         - GraphAugmentation: samples k mid-range offsets, attends over shifted messages
-          (alive→alive option, zero-padded shifts), returns per-pixel message and
-          optional attention map
+          (alive→alive), returns per-pixel message and optional attention map
         - GroupNorm on update field dx (not on the state)
         - Alive gating: pre-update on dx; post-update on ALPHA only
         - Stochastic fire_rate mask shared across channels
 
-    Key knobs (forwarded to GraphAugmentation / policy)
+    Key knobs
         update_gain, alpha_thr, message_gain, hidden_only, d_model,
         attention_radius, num_neighbors, gating_hidden, alive_to_alive,
         graph_zero_padded_shift.
@@ -54,7 +53,7 @@ class NeuralCAGraph(nn.Module):
         self.device = device
 
         # Perception (frozen depthwise: identity + Sobel)
-        self.perception = FixedSobelPerception(n_channels)  # -> [B, 3*C, H, W]
+        self.perception = FixedSobelPerception(n_channels)  # [B, 3*C, H, W]
 
         # Local update MLP (1×1 convs, zero-init last layer)
         in_dim = n_channels * 3
@@ -80,7 +79,6 @@ class NeuralCAGraph(nn.Module):
             alpha_thr=self.alpha_thr,
         )
 
-        # How we inject the graph message
         self.message_gain = float(message_gain)
         self.hidden_only = bool(hidden_only)
 
@@ -88,7 +86,6 @@ class NeuralCAGraph(nn.Module):
     def _alive_mask(self, x: torch.Tensor) -> torch.Tensor:
         """
         Alive mask from ALPHA channel, dilated by 3×3 max-pool.
-        Returns [B,1,H,W] (float in {0,1})
         """
         alpha = x[:, 3:4]
         m = (F.max_pool2d(alpha, kernel_size=3, stride=1, padding=1) > self.alpha_thr).float()
@@ -140,7 +137,7 @@ class NeuralCAGraph(nn.Module):
             m = self.graph(x)  # m: [B,C,H,W]
             attn_map = None
 
-        # Merge message into dx via bounded residual (policy may zero-out RGB+alpha)
+        # Merge message into dx via bounded residual
         dx = dx + self._apply_message_policy(m)
 
         # 5) Stochastic firing mask (shared across channels)

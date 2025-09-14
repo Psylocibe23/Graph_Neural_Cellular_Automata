@@ -1,4 +1,3 @@
-# src/testing/test_graph_augmented_nca.py
 import os, random, math
 import numpy as np
 import torch
@@ -12,7 +11,6 @@ from modules.ncagraph import NeuralCAGraph
 """
 Run a checkpointed NeuralCAGraph on a single seed and export per-step visual diagnostics.
 
-What it does
   - Loads config + checkpoint, builds the model in eval mode.
   - Simulates for STEPS with fixed or random fire_rate from a [1,C,H,W] seed.
   - Requests the model’s attention map (return_attention=True) and reconstructs the
@@ -26,7 +24,7 @@ What it does
 
 
 # ------------------------------------------------------------
-# Small helper: coerce tensor/array-like -> numpy
+# Helper: coerce tensor/array-like -> numpy
 # ------------------------------------------------------------
 def to_np(x):
     if isinstance(x, np.ndarray):
@@ -37,7 +35,7 @@ def to_np(x):
 
 
 # ------------------------------------------------------------
-# Utility: mask RGB by alpha and (optionally) upscale
+# Utility: mask RGB by alpha and upscale
 # ------------------------------------------------------------
 def masked_rgb(x4, alpha_thr=0.1, upscale=1):
     """
@@ -73,14 +71,10 @@ def shift2d(x, dy, dx, zero_pad=True):
 
 
 # ------------------------------------------------------------
-# Reconstruct the *exact* graph aggregation used this step
+# Reconstruct the graph aggregation used this step
 # ------------------------------------------------------------
 @torch.no_grad()
 def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
-    """
-    x: [1,C,H,W] tensor BEFORE the update step
-    graph_mod: modules.graph_augmentation.GraphAugmentation
-    """
     B, C, H, W = x.shape
     assert B == 1, "This debug visual expects batch=1."
 
@@ -125,7 +119,6 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
 
     if len(chosen) == 0:
         hw_zeros = torch.zeros(H, W, device=x.device)
-        # Everything zero; keep shapes consistent
         return hw_zeros.cpu(), hw_zeros.cpu(), A_recv[0, 0].cpu(), \
                {"rgb": hw_zeros.cpu(), "alpha": hw_zeros.cpu(), "hidden": hw_zeros.cpu()}, []
 
@@ -152,9 +145,9 @@ def debug_graph_from_state(x, graph_mod, alpha_thr=0.1):
 
     rgb_map = ch_mean(slice(0, 3)) if C >= 3 else torch.zeros_like(attn_map)
     alpha_map = ch_mean(slice(3, 4)) if C >= 4 else torch.zeros_like(attn_map)
-    hidden_map= ch_mean(slice(4, C)) if C >  4 else torch.zeros_like(attn_map)
+    hidden_map = ch_mean(slice(4, C)) if C >  4 else torch.zeros_like(attn_map)
 
-    # Per-offset contributions (for tiles)
+    # Per-offset contributions
     per_offset = []
     for i, (dy, dx) in enumerate(chosen):
         m_i = weighted[i, 0].abs().mean(dim=0)  # [H,W]
@@ -265,13 +258,13 @@ def main():
 
     # Pick checkpoint
     ckpt_path = f"outputs/graphaug_nca/train_inter_loss/{target_name}/checkpoints/nca_epoch380.pt"
-    out_dir   = f"outputs/graphaug_nca/test_attention/{target_name}"
+    out_dir = f"outputs/graphaug_nca/test_attention/{target_name}"
     os.makedirs(out_dir, exist_ok=True)
 
-    STEPS      = 300 # how many CA steps to roll
-    UPSCALE    = 4  # upscale for the RGB view
-    FR_RANDOM  = False # use random fire rate like training
-    FR_FIXED   = 0.5
+    STEPS = 300 # how many CA steps to roll
+    UPSCALE = 4  # upscale for the RGB view
+    FR_RANDOM = False # use random fire rate like training
+    FR_FIXED = 0.5
 
     # --- build model ---
     model = NeuralCAGraph(
@@ -304,22 +297,15 @@ def main():
 
     # Rollout with diagnostics
     for t in range(STEPS + 1):
-        # ---- pre-step visuals will reflect the next transition ----
         pre_state = state.clone()
-
-        # capture python RNG so graph offsets in debug match the forward call
         saved_rng = random.getstate()
-
-        # step the model
         if FR_RANDOM:
             fr = float(torch.empty(1, device=device).uniform_(0.5, 1.0).item())
         else:
             fr = FR_FIXED
-
         with torch.no_grad():
             state, attn = model(pre_state, fire_rate=fr, return_attention=True)
 
-        # reconstruct graph internals from the same RNG offsets on pre_state
         random.setstate(saved_rng)
         attn_dbg, senders, receivers, group_maps, per_offset = \
             debug_graph_from_state(pre_state, model.graph, alpha_thr=model.alpha_thr)
@@ -327,7 +313,7 @@ def main():
         rgb_now = masked_rgb(state[:, :4], alpha_thr=alpha_thr, upscale=UPSCALE)
 
         # save panels
-        main_path  = save_main_panel(
+        main_path = save_main_panel(
             t, out_dir, rgb_now, attn[0], senders, receivers,
             {"rgb": group_maps["rgb"], "alpha": group_maps["alpha"], "hidden": group_maps["hidden"]}
         )

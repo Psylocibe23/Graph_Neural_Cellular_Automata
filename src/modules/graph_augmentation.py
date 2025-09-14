@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 class GraphAugmentation(nn.Module):
     """
-    GraphAugmentation — mid-range attention message passing for NeuralCAGraph.
+    GraphAugmentation: mid-range attention message passing for NeuralCAGraph.
 
     What it does
       - Per step, sample k mid-range offsets, shift Key/Message features,
@@ -146,9 +146,9 @@ class GraphAugmentation(nn.Module):
                 return agg_message, attn_map
             return agg_message
 
-        # Stack and softmax over offsets (numerically stable)
+        # Stack and softmax over offsets 
         L = torch.stack(logits, dim=0)  # [N, B]
-        L = L - L.max(dim=0, keepdim=True).values  # subtract max per batch item
+        L = L - L.max(dim=0, keepdim=True).values  
         denom = self.scaling.abs() + 1e-6  # positive temperature
         Wt = F.softmax(L / denom, dim=0)  # [N, B]
         Wt = Wt.view(len(chosen), B, 1, 1, 1)  # broadcast to [N,B,1,1,1]

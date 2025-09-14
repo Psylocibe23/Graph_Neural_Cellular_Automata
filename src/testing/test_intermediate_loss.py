@@ -12,14 +12,6 @@ from utils.image import load_single_target_image
 test_intermediate_loss.py — classic NCA growth rollout (frames + quick grid).
 Roll a trained classic NCA (no graph augmentation) from a single seed and
 dump per-step RGBA frames to disk for visual inspection.
-
-What it does
-  - Loads config and a specified checkpoint (edit `ckpt_path`).
-  - Builds NeuralCA with training knobs and seeds a 1-cell embryo at center.
-  - Steps the CA for `steps` iterations using a fixed or random fire-rate.
-  - Saves masked, upscaled frames `frame_###.png`.
-  - Shows a tiny grid of selected steps at the end (for quick sanity check).
-  - Note: despite the filename, this script does not compute loss; it’s a rollout.
 """
 
 
@@ -60,7 +52,6 @@ def main():
     save_dir  = f"outputs/classic_nca/test_growth/{target_name}"
     os.makedirs(save_dir, exist_ok=True)
 
-    # Optional: load target for side-by-side checking later (not needed to roll)
     _ = load_single_target_image(config).to(device)
 
     # --- BUILD MODEL ---
@@ -81,15 +72,15 @@ def main():
     if unexpected: print(f"[test] unexpected model keys (ignored): {unexpected}")
     model.eval()
 
-    # --- PREPARE SEED ---
+    # --- Prepare seed ---
     seed = make_seed(n_channels, img_size, batch_size=1, device=device)
 
-    # --- ROLLOUT ---
+    # --- Rollout ---
     state = seed.clone()
     all_imgs = []
 
     # Fire-rate policy
-    FR_FIXED  = 0.5
+    FR_FIXED = 0.5
     FR_RANDOM = False
 
     with torch.no_grad():
@@ -103,7 +94,7 @@ def main():
 
     print(f"All growth frames saved to {save_dir}")
 
-    # --- DISPLAY A GRID OF SELECTED FRAMES ---
+    # --- Display a grid of selected frames ---
     select_steps = [1, 2, 4, 8, 16, 32, 49]
     n = len(select_steps)
     plt.figure(figsize=(n * 2, 2.5))

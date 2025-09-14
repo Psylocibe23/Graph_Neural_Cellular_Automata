@@ -13,20 +13,9 @@ Evaluate a trained Graph-NCA checkpoint under different, controlled damage types
 For each damage kind, the script applies one damage event at a chosen step, then
 records growth/regrowth dynamics and graph-attention diagnostics.
 
-What it does
-  - Loads config, builds NeuralCAGraph with training knobs, and loads the exact --ckpt-path.
-  - Selects damage kinds from --kinds or from config.damage.kinds; optionally adds a clean run.
-  - For each kind, runs a single-seed rollout for --steps:
-      – applies that specific damage once at --damage-step,
-      – saves per-step panels “combo_###.png” (RGB masked, attention heatmap,
-        attention overlaid with sender/receiver, per-group message magnitudes RGB/α/hidden),
-      – saves attention-only frames “attn_only_###.png”.
-  - Writes videos (attention.mp4, combo.mp4) if imageio is available and a meta.json with settings.
-  - Normalizes Windows paths to WSL so --out-root works on both Windows and WSL.
-
 Example
   PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py 
-    --ckpt-path /mnt/c/Users/sprea/Desktop/pythonProject/GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch660.pt 
+    --ckpt-path .../GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch865.pt 
     --target gecko --include-clean
 """
 
@@ -115,7 +104,7 @@ def main():
     ap.add_argument("--damage-step", type=int, default=120)
     ap.add_argument("--fr", type=float, default=0.5) # fixed fire rate for test
     ap.add_argument("--fps", type=int, default=20)
-    ap.add_argument("--out-root", default=r"C:\Users\sprea\Desktop\pythonProject\GNN_NCA\outputs\graphaug_nca\test_regrowth")
+    ap.add_argument("--out-root", default=r"C:\Users\...\GNN_NCA\outputs\graphaug_nca\test_regrowth")
     ap.add_argument("--kinds", default="", help="Comma list of damage kinds; default uses config.damage.kinds keys.")
     ap.add_argument("--include-clean", action="store_true", help="Also run a no-damage growth test.")
     args = ap.parse_args()
@@ -153,7 +142,7 @@ def main():
     # ---- Load passed checkpoint ----
     ckpt = torch.load(args.ckpt_path, map_location=device)
     missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
-    if missing:   print(f"[test] missing keys: {missing}")
+    if missing: print(f"[test] missing keys: {missing}")
     if unexpected:print(f"[test] unexpected keys: {unexpected}")
     print(f"[test] Loaded {args.ckpt_path} (epoch {ckpt.get('epoch')})")
 
@@ -207,10 +196,10 @@ def main():
             # sender/receiver masks (same dilation as training)
             with torch.no_grad():
                 receiver = (F.max_pool2d(pre_state[:, 3:4], 3, 1, 1) > alpha_thr).float()[0, 0].cpu()
-                sender   = receiver.clone()  # alive-to-alive
+                sender = receiver.clone()  # alive-to-alive
                 # per-group magnitudes for visualization
                 M = model.graph.msg_proj(pre_state)
-                rgb_map   = M[0, :3].abs().mean(dim=0).cpu()
+                rgb_map = M[0, :3].abs().mean(dim=0).cpu()
                 alpha_map = M[0, 3:4].abs().mean(dim=0).cpu()
                 hidden_map= M[0, 4:].abs().mean(dim=0).cpu()
 
