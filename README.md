@@ -34,4 +34,5 @@ We build on the classic differentiable Neural Cellular Automata (NCA) and augmen
 
 ### Outputs
 - `outputs/graphaug_nca/...` — Checkpoints and videos for the graph-augmented runs.
+  - `outputs/graphaug_nca/test_regrowth/...` — Regeneration test videos (MP4) showing repair after different types of damage.
 - `outputs/classic_nca/...` — Checkpoints for the classic NCA baseline.
