@@ -15,7 +15,7 @@ records growth/regrowth dynamics and graph-attention diagnostics.
 
 Example
   PYTHONPATH=src python src/testing/test_graph_augmented_regeneration.py 
-    --ckpt-path .../GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch865.pt 
+    --ckpt-path .../GNN_NCA/outputs/graphaug_nca/train_inter_loss/gecko/checkpoints/nca_epoch960.pt 
     --target gecko --include-clean
 """
 
@@ -104,7 +104,7 @@ def main():
     ap.add_argument("--damage-step", type=int, default=120)
     ap.add_argument("--fr", type=float, default=0.5) # fixed fire rate for test
     ap.add_argument("--fps", type=int, default=20)
-    ap.add_argument("--out-root", default=r"C:\Users\...\GNN_NCA\outputs\graphaug_nca\test_regrowth")
+    ap.add_argument("--out-root", default=r"C:\Users\Sprea/Desktop/pythonProject\GNN_NCA\outputs\graphaug_nca\test_regrowth")  # Adjust path according to project location 
     ap.add_argument("--kinds", default="", help="Comma list of damage kinds; default uses config.damage.kinds keys.")
     ap.add_argument("--include-clean", action="store_true", help="Also run a no-damage growth test.")
     args = ap.parse_args()

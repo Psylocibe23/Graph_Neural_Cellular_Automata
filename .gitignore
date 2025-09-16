@@ -12,9 +12,8 @@ outputs/**
 !outputs/**/checkpoints/
 !outputs/**/checkpoints/*.pt
 
-!outputs/**/test_regrowth/**/
-!outputs/**/test_regrowth/**/combo.mp4
-!outputs/**/test_regrowth/**/attention.mp4
+# allow regeneration test videos
+!outputs/**/test_regrowth/**/*.mp4
 
 data/**
 !data/**/
